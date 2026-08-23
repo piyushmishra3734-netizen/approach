@@ -6,6 +6,10 @@ Francisco, New York, London or Tokyo.
 
 **Play: https://piyushmishra3734-netizen.github.io/approach/**
 
+The car model is 18 MB, so it is never fetched behind your back: the start
+screen offers it as a download with a progress bar, and Drive only unlocks once
+it is in.
+
 Three.js + `3d-tiles-renderer` for the world, TanStack Start (React 19, Vite,
 Tailwind v4) for the shell. No install, no account, nothing to save.
 

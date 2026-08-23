@@ -19,6 +19,65 @@ const WHEEL_NODES = {
 export type WheelId = keyof typeof WHEEL_NODES;
 export const WHEEL_IDS = Object.keys(WHEEL_NODES) as WheelId[];
 
+/**
+ * The model is tens of megabytes, so it is fetched once, up front, on a button
+ * the player presses — never silently at the start of a drive. Holding the
+ * bytes here rather than trusting the HTTP cache means switching vehicles or
+ * cities re-parses instead of re-downloading.
+ */
+let carBytes: ArrayBuffer | null = null;
+let carDownload: Promise<ArrayBuffer> | null = null;
+
+export function isCarDownloaded(): boolean {
+  return carBytes !== null;
+}
+
+/**
+ * Fetch the model, reporting progress in 0..1. Safe to call again: an
+ * in-flight download is shared and a finished one returns immediately.
+ */
+export function downloadCar(
+  url: string,
+  onProgress: (fraction: number, received: number, total: number) => void,
+): Promise<ArrayBuffer> {
+  if (carBytes) return Promise.resolve(carBytes);
+  carDownload ??= (async () => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`car model: HTTP ${res.status}`);
+    const total = Number(res.headers.get("content-length")) || 0;
+    const reader = res.body?.getReader();
+    if (!reader) {
+      // No streaming body to measure — take the whole thing and report done.
+      const buf = await res.arrayBuffer();
+      onProgress(1, buf.byteLength, buf.byteLength);
+      carBytes = buf;
+      return buf;
+    }
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      onProgress(total ? Math.min(1, received / total) : 0, received, total);
+    }
+    const merged = new Uint8Array(received);
+    let at = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, at);
+      at += chunk.length;
+    }
+    onProgress(1, received, total || received);
+    carBytes = merged.buffer;
+    return carBytes;
+  })().catch((err) => {
+    carDownload = null;
+    throw err;
+  });
+  return carDownload;
+}
+
 export type CarModel = {
   group: THREE.Group;
   /** Wheel centres in car-local space, y at the hub. */
@@ -50,7 +109,10 @@ function findByPattern(root: THREE.Object3D, pattern: RegExp): THREE.Object3D | 
  * re-exported or swapped model does not silently drive backwards.
  */
 export async function loadCar(url: string): Promise<CarModel> {
-  const gltf = await new GLTFLoader().loadAsync(url);
+  const bytes = await downloadCar(url, () => {});
+  // Parse a copy: GLTFLoader may take ownership of the buffer it is handed,
+  // and these bytes are kept for the next time the sim is rebuilt.
+  const gltf = await new GLTFLoader().parseAsync(bytes.slice(0), "");
   const source = gltf.scene;
   source.updateMatrixWorld(true);
 

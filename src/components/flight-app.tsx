@@ -23,15 +23,17 @@ const EMPTY_HUD: HudSnapshot = {
   error: null,
 };
 
-const VEHICLES: { id: Vehicle; label: string; action: string }[] = [
-  { id: "plane", label: "Plane", action: "Fly" },
-  { id: "car", label: "Car", action: "Drive" },
-];
+/** Rounded size of the car model, for the label before the fetch reports one. */
+const CAR_DOWNLOAD_MB = 18;
 
 const STICK_RADIUS = 56;
 const STICK_DEADZONE = 0.14;
 const CITY_KEY = "approach.city";
 const VEHICLE_KEY = "approach.vehicle";
+
+function mb(bytes: number) {
+  return (bytes / 1048576).toFixed(1);
+}
 
 function padHeading(deg: number) {
   return Math.round(deg).toString().padStart(3, "0");
@@ -105,6 +107,8 @@ export function FlightApp() {
   const [thrustHeld, setThrustHeld] = useState<"thrust" | "brake" | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [canFullscreen, setCanFullscreen] = useState(false);
+  const [carState, setCarState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
+  const [carBytes, setCarBytes] = useState({ received: 0, total: 0 });
   cityRef.current = cityId;
   vehicleRef.current = vehicle;
 
@@ -199,6 +203,27 @@ export function FlightApp() {
     sync();
     document.addEventListener("fullscreenchange", sync);
     return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
+  useEffect(() => {
+    // A model kept from an earlier visit to this menu needs no second fetch.
+    void import("@/game/car").then(({ isCarDownloaded }) => {
+      if (isCarDownloaded()) setCarState("ready");
+    });
+  }, []);
+
+  /** Fetch the car model on an explicit press, showing progress as it comes. */
+  const getCar = useCallback(() => {
+    setCarState("downloading");
+    setCarBytes({ received: 0, total: 0 });
+    void import("@/game/car")
+      .then(({ downloadCar }) =>
+        downloadCar(`${import.meta.env.BASE_URL}models/lamborghini.glb`, (_f, received, total) =>
+          setCarBytes({ received, total }),
+        ),
+      )
+      .then(() => setCarState("ready"))
+      .catch(() => setCarState("failed"));
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -375,6 +400,9 @@ export function FlightApp() {
 
   const city = CITIES[cityId];
   const isCar = vehicle === "car";
+  const carPercent = carBytes.total
+    ? Math.round((carBytes.received / carBytes.total) * 100)
+    : 0;
   const controlHint = touchUi
     ? isCar
       ? "Stick to steer · Throttle and brake on the right · Eye button for the driver's seat"
@@ -467,23 +495,69 @@ export function FlightApp() {
           </div>
 
           <div className="flex flex-col gap-5">
-            <div className="rise rise-4 flex flex-col gap-3 sm:flex-row" role="group" aria-label="Start">
-              {VEHICLES.map((v, i) => (
+            <div className="rise rise-4 flex flex-col gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row" role="group" aria-label="Start">
                 <button
-                  key={v.id}
-                  ref={i === 0 ? flyBtnRef : undefined}
+                  ref={flyBtnRef}
                   type="button"
-                  onClick={() => startWith(v.id)}
+                  onClick={() => startWith("plane")}
                   disabled={!simReady || bootError}
-                  className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-40 ${
-                    v.id === vehicle
+                  className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
+                    vehicle === "plane"
                       ? "bg-accent text-bg hover:opacity-90"
                       : "border border-line text-fg hover:border-fg/40"
                   }`}
                 >
-                  {bootError ? "Unavailable" : !simReady ? "Preparing" : v.action}
+                  {bootError ? "Unavailable" : !simReady ? "Preparing" : "Fly"}
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={carState === "ready" ? () => startWith("car") : getCar}
+                  disabled={!simReady || bootError || carState === "downloading"}
+                  className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
+                    vehicle === "car" && carState === "ready"
+                      ? "bg-accent text-bg hover:opacity-90"
+                      : "border border-line text-fg hover:border-fg/40"
+                  }`}
+                >
+                  {bootError
+                    ? "Unavailable"
+                    : !simReady
+                      ? "Preparing"
+                      : carState === "ready"
+                        ? "Drive"
+                        : carState === "downloading"
+                          ? `${carPercent}%`
+                          : carState === "failed"
+                            ? "Retry car"
+                            : `Get car · ${CAR_DOWNLOAD_MB} MB`}
+                </button>
+              </div>
+
+              {carState === "downloading" || carState === "failed" ? (
+                <div className="flex w-full max-w-sm flex-col gap-1.5">
+                  <div
+                    className="h-1 w-full overflow-hidden rounded-full bg-line"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={carPercent}
+                    aria-label="Car model download"
+                  >
+                    <div
+                      className="h-full rounded-full bg-accent transition-[width] duration-150"
+                      style={{ width: `${carPercent}%` }}
+                    />
+                  </div>
+                  <p className="font-mono text-xs tracking-hud text-muted" aria-live="polite">
+                    {carState === "failed"
+                      ? "Download failed — check the connection and try again"
+                      : `${mb(carBytes.received)} / ${
+                          carBytes.total ? mb(carBytes.total) : CAR_DOWNLOAD_MB
+                        } MB · the Lamborghini and its textures`}
+                  </p>
+                </div>
+              ) : null}
             </div>
             <div className="rise rise-5 flex flex-wrap gap-x-6 gap-y-2" role="group" aria-label="City">
               {CITY_ORDER.map((id) => (
