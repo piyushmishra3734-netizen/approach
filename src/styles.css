@@ -1,0 +1,350 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #08090b;
+  --color-fg: #ecece8;
+  --color-muted: #8a8e94;
+  --color-dim: #5c6168;
+  --color-accent: #d8dbe0;
+  --color-line: rgb(255 255 255 / 0.14);
+  --color-veil: rgb(8 9 11 / 0.48);
+  --font-sans: "Barlow", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --tracking-display: 0.42em;
+  --tracking-label: 0.28em;
+  --tracking-hud: 0.18em;
+  --spacing-safe-t: env(safe-area-inset-top, 0px);
+  --spacing-safe-b: env(safe-area-inset-bottom, 0px);
+  --spacing-safe-l: env(safe-area-inset-left, 0px);
+  --spacing-safe-r: env(safe-area-inset-right, 0px);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-quick: 150ms;
+  --motion-fast: 250ms;
+  --motion-slow: 400ms;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    width: 100%;
+    height: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+
+  html,
+  body {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #app {
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+/* Pressable controls — interruptible scale */
+.btn-press {
+  transition-property: transform, opacity;
+  transition-duration: var(--motion-quick);
+  transition-timing-function: ease-out;
+}
+.btn-press:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.btn-press:disabled {
+  cursor: not-allowed;
+}
+
+/* Start menu — one-shot staggered enter, quick exit */
+.overlay-menu {
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--motion-quick) ease-in;
+}
+.overlay-menu.is-open {
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity var(--motion-slow) var(--ease-out);
+}
+.overlay-menu .rise {
+  opacity: 0;
+  transform: translateY(12px);
+  filter: blur(4px);
+}
+.overlay-menu.is-open .rise {
+  animation: rise-in var(--motion-slow) var(--ease-out) forwards;
+}
+.overlay-menu.is-open .rise-1 {
+  animation-delay: 40ms;
+}
+.overlay-menu.is-open .rise-2 {
+  animation-delay: 80ms;
+}
+.overlay-menu.is-open .rise-3 {
+  animation-delay: 120ms;
+}
+.overlay-menu.is-open .rise-4 {
+  animation-delay: 160ms;
+}
+.overlay-menu.is-open .rise-5 {
+  animation-delay: 200ms;
+}
+.overlay-menu.is-open .rise-6 {
+  animation-delay: 240ms;
+}
+
+@keyframes rise-in {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+/* Pause — modal recipe, open slower / close quicker */
+.overlay-pause {
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--motion-quick) ease-in;
+}
+.overlay-pause.is-open {
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.overlay-pause .panel {
+  opacity: 0;
+  transform: scale(0.96) translateY(8px);
+  transition-property: opacity, transform;
+  transition-duration: var(--motion-quick);
+  transition-timing-function: ease-in;
+}
+.overlay-pause.is-open .panel {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-out);
+}
+
+/* In-flight HUD */
+.hud-layer {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-slow) var(--ease-out);
+}
+.hud-layer.is-on {
+  opacity: 1;
+}
+
+.fly-hint {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  filter: blur(0);
+  transition-property: opacity, transform, filter;
+  transition-duration: var(--motion-slow);
+  transition-timing-function: var(--ease-out);
+}
+.fly-hint.is-gone {
+  opacity: 0;
+  transform: translate(-50%, -8px);
+  filter: blur(2px);
+}
+
+/* Streaming / error chips */
+.status-chip {
+  left: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 4.25rem);
+  opacity: 0;
+  transform: translate(-50%, 6px);
+  filter: blur(2px);
+  pointer-events: none;
+  transition-property: opacity, transform, filter;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-out);
+}
+.status-chip.is-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  filter: blur(0);
+}
+
+/* Top load rail */
+.load-rail {
+  position: absolute;
+  top: env(safe-area-inset-top, 0px);
+  left: 0;
+  right: 0;
+  z-index: 45;
+  height: 2px;
+  pointer-events: none;
+  overflow: hidden;
+  background: rgb(8 9 11 / 0.45);
+  opacity: 0;
+  transition: opacity var(--motion-slow) var(--ease-out);
+}
+.load-rail.is-on {
+  opacity: 1;
+}
+.load-rail-fill {
+  height: 100%;
+  width: 100%;
+  background: var(--color-accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.load-rail.is-wait .load-rail-fill {
+  width: 28%;
+  transform: none;
+  animation: rail-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes rail-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}
+
+/* Loading label shimmer */
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--color-dim) 0%,
+    var(--color-fg) 45%,
+    var(--color-dim) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: shimmer-move 1.8s linear infinite;
+}
+
+@keyframes shimmer-move {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+/* City switch copy */
+.city-hint {
+  animation: hint-swap var(--motion-fast) var(--ease-out);
+}
+
+@keyframes hint-swap {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+/* City selector underline */
+.city-btn {
+  position: relative;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+.city-btn::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  height: 1px;
+  background: var(--color-fg);
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.city-btn.is-on {
+  color: var(--color-fg);
+}
+.city-btn.is-on::after {
+  transform: scaleX(1);
+}
+
+/* Virtual stick */
+.stick-ring {
+  animation: stick-in var(--motion-fast) var(--ease-out);
+}
+@keyframes stick-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Throttle pip */
+.throttle-track {
+  position: relative;
+  width: 2px;
+  height: 3.5rem;
+  background: var(--color-line);
+  overflow: hidden;
+}
+.throttle-fill {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--color-accent);
+  transition: height var(--motion-fast) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

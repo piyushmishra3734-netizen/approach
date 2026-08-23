@@ -1,0 +1,20 @@
+node_modules/
+.node_modules.lock
+dist/
+.output/
+.nitro/
+.tanstack/
+.vercel/
+artifacts/
+screenshots/
+*.log
+.DS_Store
+
+# Grok App Builder's own material — xAI-authored agent docs, not this game.
+# Kept on disk, out of the public repo. .grok/app-env.json stays: the build
+# reads it for VITE_AUTH_ENABLED.
+/AGENTS.md
+/.grok/skills/
+/.grok/references/
+/.claude/
+/.grok/status
