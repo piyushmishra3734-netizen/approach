@@ -19,6 +19,7 @@ const EMPTY_HUD: HudSnapshot = {
   vehicle: "plane",
   speedKph: 0,
   blocked: false,
+  onRoad: true,
   error: null,
 };
 
@@ -396,7 +397,8 @@ export function FlightApp() {
   const streaming = !bootError && (!simReady || !hud.ready || progress < 100);
   const waitRail = streaming && progress <= 2 && !hud.ready;
   const status = loadLabel(simReady, hud, progress, bootError);
-  const showStreamChip = flying && !hud.ready && !hud.error;
+  const findingRoad = flying && isCar && !hud.onRoad && !hud.error && !bootError;
+  const showStreamChip = flying && (!hud.ready || findingRoad) && !hud.error;
   const showErrorChip = Boolean((hud.error && !hud.ready) || bootError);
 
   return (
@@ -601,7 +603,9 @@ export function FlightApp() {
           ? bootError
             ? "3D view unavailable"
             : "City tiles unavailable"
-          : "Streaming city"}
+          : findingRoad
+            ? "Finding the road"
+            : "Streaming city"}
       </div>
 
       <div

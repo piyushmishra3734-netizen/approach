@@ -142,6 +142,8 @@ export type HudSnapshot = {
   /** Car only: road speed in km/h, and whether the nose is against something. */
   speedKph: number;
   blocked: boolean;
+  /** Car only: false while the model or the street under it is still loading. */
+  onRoad: boolean;
   error: string | null;
 };
 
@@ -736,6 +738,7 @@ export function createSim(
       vehicle,
       speedKph: pose.speed * 3.6,
       blocked,
+      onRoad: vehicle !== "car" || carGrounded,
       error: tilesError,
     });
   }
