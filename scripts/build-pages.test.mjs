@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { relativizeRootPaths } from "./build-pages.mjs";
+import { dropDeadManifestLink, relativizeRootPaths } from "./build-pages.mjs";
 
 const SHELL =
   '<link rel="icon" href="/favicon.svg"/>' +
@@ -22,4 +22,15 @@ test("only the refs that miss the deploy base are made relative", () => {
 
 test("a site served from the root is left exactly as built", () => {
   assert.equal(relativizeRootPaths(SHELL, "/"), SHELL);
+});
+
+test("the dead PWA manifest link goes, the Grok extensions script stays", () => {
+  const out = dropDeadManifestLink(
+    '<link rel="manifest" href="/__grok/manifest.webmanifest"/>' +
+      '<link rel="apple-touch-icon" href="/__grok/icon-180.png"/>' +
+      '<script src="https://grok.com/grok-app-builder/extensions.js" defer></script>',
+  );
+  assert.doesNotMatch(out, /rel="manifest"/);
+  assert.match(out, /grok-app-builder\/extensions\.js/);
+  assert.match(out, /apple-touch-icon/);
 });

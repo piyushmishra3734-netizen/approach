@@ -33,8 +33,19 @@ export function relativizeRootPaths(html, base = "/") {
   );
 }
 
+/**
+ * Drop the PWA manifest link. The injector serves `manifest.webmanifest` from
+ * Nitro middleware, which a static host cannot run, so the tag is a guaranteed
+ * 404 here. The "Created with Grok" extensions script is a plain `<script src>`
+ * and is left exactly as injected.
+ */
+export function dropDeadManifestLink(html) {
+  return html.replace(/<link\b[^>]*\brel="manifest"[^>]*>/g, "");
+}
+
 function main() {
-  const html = relativizeRootPaths(readFileSync(join(CLIENT_DIR, "_shell.html"), "utf8"), BASE);
+  const shell = readFileSync(join(CLIENT_DIR, "_shell.html"), "utf8");
+  const html = relativizeRootPaths(dropDeadManifestLink(shell), BASE);
   for (const name of ["index.html", "404.html"]) {
     writeFileSync(join(CLIENT_DIR, name), html);
   }
