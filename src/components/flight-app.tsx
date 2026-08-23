@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Menu } from "lucide-react";
+import { Maximize, Menu, Minimize, RotateCw } from "lucide-react";
 import { CITIES, CITY_ORDER, type CityId } from "@/game/cities";
-import type { HudSnapshot, SimHandle } from "@/game/sim";
+import type { HudSnapshot, SimHandle, Vehicle } from "@/game/sim";
 
 const EMPTY_HUD: HudSnapshot = {
   ready: false,
@@ -16,12 +16,21 @@ const EMPTY_HUD: HudSnapshot = {
   lon: 0,
   flying: false,
   cameraMode: "chase",
+  vehicle: "plane",
+  speedKph: 0,
+  blocked: false,
   error: null,
 };
+
+const VEHICLES: { id: Vehicle; label: string; action: string }[] = [
+  { id: "plane", label: "Plane", action: "Fly" },
+  { id: "car", label: "Car", action: "Drive" },
+];
 
 const STICK_RADIUS = 56;
 const STICK_DEADZONE = 0.14;
 const CITY_KEY = "approach.city";
+const VEHICLE_KEY = "approach.vehicle";
 
 function padHeading(deg: number) {
   return Math.round(deg).toString().padStart(3, "0");
@@ -43,11 +52,23 @@ function clampStick(dx: number, dy: number) {
 function readStoredCity(): CityId {
   try {
     const v = localStorage.getItem(CITY_KEY);
-    if (v === "sf" || v === "nyc") return v;
+    // Validate against the live list so adding a city does not need a second
+    // edit here, and a stale id from an older build falls back cleanly.
+    if (v && (CITY_ORDER as string[]).includes(v)) return v as CityId;
   } catch {
     /* private mode */
   }
   return "sf";
+}
+
+function readStoredVehicle(): Vehicle {
+  try {
+    const v = localStorage.getItem(VEHICLE_KEY);
+    if (v === "plane" || v === "car") return v;
+  } catch {
+    /* private mode */
+  }
+  return "plane";
 }
 
 function loadLabel(simReady: boolean, hud: HudSnapshot, progress: number, bootError: boolean) {
@@ -66,6 +87,7 @@ export function FlightApp() {
   const originRef = useRef({ x: 0, y: 0, id: -1 });
   const offsetRef = useRef({ x: 0, y: 0 });
   const cityRef = useRef<CityId>("sf");
+  const vehicleRef = useRef<Vehicle>("plane");
   const pendingStart = useRef(false);
   const resumeBtnRef = useRef<HTMLButtonElement>(null);
   const flyBtnRef = useRef<HTMLButtonElement>(null);
@@ -73,26 +95,33 @@ export function FlightApp() {
   const [menu, setMenu] = useState(true);
   const [paused, setPaused] = useState(false);
   const [cityId, setCityId] = useState<CityId>("sf");
+  const [vehicle, setVehicle] = useState<Vehicle>("plane");
   const [hintVisible, setHintVisible] = useState(true);
   const [touchUi, setTouchUi] = useState(false);
   const [simReady, setSimReady] = useState(false);
   const [bootError, setBootError] = useState(false);
   const [stickHeld, setStickHeld] = useState(false);
   const [thrustHeld, setThrustHeld] = useState<"thrust" | "brake" | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [canFullscreen, setCanFullscreen] = useState(false);
   cityRef.current = cityId;
+  vehicleRef.current = vehicle;
 
   useEffect(() => {
-    const stored = readStoredCity();
-    if (stored !== cityRef.current) setCityId(stored);
+    const storedCity = readStoredCity();
+    if (storedCity !== cityRef.current) setCityId(storedCity);
+    const storedVehicle = readStoredVehicle();
+    if (storedVehicle !== vehicleRef.current) setVehicle(storedVehicle);
   }, []);
 
   useEffect(() => {
     try {
       localStorage.setItem(CITY_KEY, cityId);
+      localStorage.setItem(VEHICLE_KEY, vehicle);
     } catch {
       /* private mode */
     }
-  }, [cityId]);
+  }, [cityId, vehicle]);
 
   useEffect(() => {
     const coarse = window.matchMedia("(pointer: coarse)");
@@ -117,7 +146,7 @@ export function FlightApp() {
       .then(({ createSim }) => {
         if (cancelled || !mountRef.current) return;
         try {
-          handle = createSim(mountRef.current, setHud, cityRef.current);
+          handle = createSim(mountRef.current, setHud, cityRef.current, vehicleRef.current);
         } catch {
           setBootError(true);
           return;
@@ -141,8 +170,11 @@ export function FlightApp() {
       cancelled = true;
       handle?.dispose();
       simRef.current = null;
+      setSimReady(false);
     };
-  }, []);
+    // The vehicle is baked into the sim (which model, which dynamics), so
+    // switching it rebuilds — only ever from the menu, never mid-drive.
+  }, [vehicle]);
 
   useEffect(() => {
     simRef.current?.setCity(cityId);
@@ -157,6 +189,25 @@ export function FlightApp() {
   useEffect(() => {
     if (paused) resumeBtnRef.current?.focus();
   }, [paused]);
+
+  useEffect(() => {
+    // iOS Safari has no Fullscreen API on ordinary elements, so the control is
+    // only offered where it will actually do something.
+    setCanFullscreen(typeof document.documentElement.requestFullscreen === "function");
+    const sync = () => setFullscreen(Boolean(document.fullscreenElement));
+    sync();
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const done = document.fullscreenElement
+      ? document.exitFullscreen()
+      : document.documentElement.requestFullscreen();
+    // A rejected request (denied, or already changing) must not surface as an
+    // unhandled rejection; the button simply does nothing.
+    void done?.catch(() => {});
+  }, []);
 
   const resetTouch = useCallback(() => {
     setStickHeld(false);
@@ -179,6 +230,32 @@ export function FlightApp() {
     setHintVisible(true);
     mountRef.current?.focus();
   }, [bootError]);
+
+  /**
+   * Start in the chosen vehicle. Picking the other one rebuilds the sim, so the
+   * start is deferred to the moment that rebuild finishes rather than firing at
+   * the sim that is about to be thrown away.
+   */
+  const startWith = useCallback(
+    (next: Vehicle) => {
+      if (bootError) return;
+      if (next !== vehicleRef.current) {
+        pendingStart.current = true;
+        setVehicle(next);
+        return;
+      }
+      begin();
+    },
+    [bootError, begin],
+  );
+
+  const restart = useCallback(() => {
+    setPaused(false);
+    resetTouch();
+    simRef.current?.restart();
+    simRef.current?.setFlying(true);
+    mountRef.current?.focus();
+  }, [resetTouch]);
 
   const resume = useCallback(() => {
     setPaused(false);
@@ -296,6 +373,22 @@ export function FlightApp() {
   }, []);
 
   const city = CITIES[cityId];
+  const isCar = vehicle === "car";
+  const controlHint = touchUi
+    ? isCar
+      ? "Stick to steer · Throttle and brake on the right · Eye button for the driver's seat"
+      : "Left stick to bank and pitch · Throttle and brake on the right"
+    : isCar
+      ? "W/S throttle and brake · A/D steer · V chase / driver's seat · R reset · Esc pause"
+      : "W/S pitch · A/D roll · Q/E yaw · Shift throttle · V view · Esc pause";
+  const shortHint = touchUi
+    ? isCar
+      ? "Stick to steer · Throttle and brake on the right"
+      : "Stick to fly · Throttle and brake on the right"
+    : isCar
+      ? "W/S throttle · A/D steer · V view"
+      : "W/S pitch · A/D roll · Shift throttle";
+  const pausedHint = isCar ? "Esc resume · V chase / driver's seat" : "Esc resume · V chase / cockpit";
   const rawProgress = hud.progress;
   const progressPct = Math.round(rawProgress > 1 ? rawProgress : rawProgress * 100);
   const progress = Math.min(100, Math.max(0, progressPct));
@@ -364,21 +457,32 @@ export function FlightApp() {
               {bootError
                 ? "The 3D view couldn't start on this device."
                 : hud.error && !hud.ready
-                  ? `${city.hint}. City tiles didn't load — you can still fly the empty sky.`
-                  : `${city.hint}. Photogrammetry of the city, streamed as you fly.`}
+                  ? isCar
+                    ? `${city.hint}. City tiles didn't load — there is no road to drive on.`
+                    : `${city.hint}. City tiles didn't load — you can still fly the empty sky.`
+                  : `${city.hint}. Photogrammetry of the city, streamed as you ${isCar ? "drive" : "fly"}.`}
             </p>
           </div>
 
           <div className="flex flex-col gap-5">
-            <button
-              ref={flyBtnRef}
-              type="button"
-              onClick={begin}
-              disabled={!simReady || bootError}
-              className="btn-press rise rise-4 h-12 w-full max-w-xs rounded-md bg-accent px-6 text-sm font-medium tracking-label text-bg uppercase hover:opacity-90 disabled:opacity-40 sm:w-auto"
-            >
-              {bootError ? "Unavailable" : simReady ? "Fly" : "Preparing"}
-            </button>
+            <div className="rise rise-4 flex flex-col gap-3 sm:flex-row" role="group" aria-label="Start">
+              {VEHICLES.map((v, i) => (
+                <button
+                  key={v.id}
+                  ref={i === 0 ? flyBtnRef : undefined}
+                  type="button"
+                  onClick={() => startWith(v.id)}
+                  disabled={!simReady || bootError}
+                  className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-40 ${
+                    v.id === vehicle
+                      ? "bg-accent text-bg hover:opacity-90"
+                      : "border border-line text-fg hover:border-fg/40"
+                  }`}
+                >
+                  {bootError ? "Unavailable" : !simReady ? "Preparing" : v.action}
+                </button>
+              ))}
+            </div>
             <div className="rise rise-5 flex flex-wrap gap-x-6 gap-y-2" role="group" aria-label="City">
               {CITY_ORDER.map((id) => (
                 <button
@@ -398,9 +502,7 @@ export function FlightApp() {
         </div>
 
         <p className="rise rise-6 max-w-md pb-14 font-mono text-xs leading-relaxed tracking-hud text-dim sm:pb-16">
-          {touchUi
-            ? "Left stick to bank and pitch · Throttle and brake on the right"
-            : "W/S pitch · A/D roll · Q/E yaw · Shift throttle · V view · Esc pause"}
+          {controlHint}
         </p>
       </div>
 
@@ -417,8 +519,33 @@ export function FlightApp() {
             </button>
             <p className="font-mono text-xs tracking-label text-fg/80 uppercase">{hud.cityName}</p>
           </div>
-          <div className="flex items-center gap-4 pt-3 sm:pt-5">
-            <p className="font-mono text-xs tracking-hud text-fg/70 tabular-nums">{padHeading(hud.heading)}°</p>
+          <div className="flex items-center gap-1 pt-3 sm:gap-2 sm:pt-5">
+            <p className="mr-2 font-mono text-xs tracking-hud text-fg/70 tabular-nums">
+              {padHeading(hud.heading)}°
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              aria-label="Reload the page"
+              className="btn-press pointer-events-auto flex size-11 items-center justify-center rounded-md text-fg/80 hover:text-fg"
+            >
+              <RotateCw className="size-5" strokeWidth={1.75} aria-hidden="true" />
+            </button>
+            {canFullscreen ? (
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                aria-label={fullscreen ? "Leave full screen" : "Full screen"}
+                aria-pressed={fullscreen}
+                className="btn-press pointer-events-auto flex size-11 items-center justify-center rounded-md text-fg/80 hover:text-fg"
+              >
+                {fullscreen ? (
+                  <Minimize className="size-5" strokeWidth={1.75} aria-hidden="true" />
+                ) : (
+                  <Maximize className="size-5" strokeWidth={1.75} aria-hidden="true" />
+                )}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -428,14 +555,18 @@ export function FlightApp() {
           }`}
         >
           <div className={`flex flex-col gap-1 ${touchUi ? "" : "pb-12"}`}>
-            <span className="font-mono text-xs tracking-label text-muted uppercase">IAS</span>
+            <span className="font-mono text-xs tracking-label text-muted uppercase">
+              {isCar ? "Speed" : "IAS"}
+            </span>
             <span className="font-mono text-2xl tabular-nums tracking-hud">
-              {Math.round(hud.speedKt)}
-              <span className="ml-2 text-xs text-muted">kt</span>
+              {Math.round(isCar ? Math.abs(hud.speedKph) : hud.speedKt)}
+              <span className="ml-2 text-xs text-muted">{isCar ? "km/h" : "kt"}</span>
             </span>
           </div>
           <div className={`flex flex-col items-end gap-1 ${touchUi ? "" : "pb-12"}`}>
-            <span className="font-mono text-xs tracking-label text-muted uppercase">Alt</span>
+            <span className="font-mono text-xs tracking-label text-muted uppercase">
+              {isCar ? "Elev" : "Alt"}
+            </span>
             <span className="font-mono text-2xl tabular-nums tracking-hud">
               {formatAlt(hud.altitudeFt)}
               <span className="ml-2 text-xs text-muted">ft</span>
@@ -455,7 +586,7 @@ export function FlightApp() {
             touchUi ? "bottom-40" : "bottom-28"
           } ${hintVisible ? "" : "is-gone"}`}
         >
-          {touchUi ? "Stick to fly · Throttle and brake on the right" : "W/S pitch · A/D roll · Shift throttle"}
+          {shortHint}
         </p>
       </div>
 
@@ -494,6 +625,13 @@ export function FlightApp() {
             </button>
             <button
               type="button"
+              onClick={restart}
+              className="btn-press h-12 w-full max-w-xs rounded-md border border-line bg-bg/40 px-6 text-sm font-medium tracking-label text-fg uppercase hover:bg-bg/55 sm:w-auto"
+            >
+              Restart
+            </button>
+            <button
+              type="button"
               onClick={toMenu}
               className="btn-press h-12 w-full max-w-xs rounded-md border border-line bg-bg/40 px-6 text-sm font-medium tracking-label text-fg uppercase hover:bg-bg/55 sm:w-auto"
             >
@@ -501,7 +639,7 @@ export function FlightApp() {
             </button>
           </div>
           <p className="font-mono text-xs tracking-hud text-dim">
-            {touchUi ? "Stick to fly · Throttle and brake on the right" : "Esc resume · V chase / cockpit"}
+            {touchUi ? shortHint : pausedHint}
           </p>
         </div>
       </div>
