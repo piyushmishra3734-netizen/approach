@@ -56,30 +56,35 @@ export type CharacterSpec = {
  * Keys are prefixes: a Sketchfab export appends `_06`, `_0198` and so on to
  * every node, and those numbers change every time the file is re-exported, so
  * matching on the stem is the only stable way to find a bone.
+ *
+ * The values have no colon in them. Mixamo names its bones `mixamorig:Hips`,
+ * but a colon is a reserved character in an animation track path, so every
+ * three.js loader strips it on the way in — look for the name Mixamo wrote and
+ * you match nothing at all, silently.
  */
 const BIPED_FROM_MIXAMO: Record<string, string> = {
-  "Bip001-Pelvis": "mixamorig:Hips",
-  "Bip001-Spine2": "mixamorig:Spine2",
-  "Bip001-Spine1": "mixamorig:Spine1",
-  "Bip001-Spine": "mixamorig:Spine",
-  "Bip001-Neck": "mixamorig:Neck",
-  "Bip001-Head": "mixamorig:Head",
-  "Bip001-L-Clavicle": "mixamorig:LeftShoulder",
-  "Bip001-L-UpperArm": "mixamorig:LeftArm",
-  "Bip001-L-Forearm": "mixamorig:LeftForeArm",
-  "Bip001-L-Hand": "mixamorig:LeftHand",
-  "Bip001-R-Clavicle": "mixamorig:RightShoulder",
-  "Bip001-R-UpperArm": "mixamorig:RightArm",
-  "Bip001-R-Forearm": "mixamorig:RightForeArm",
-  "Bip001-R-Hand": "mixamorig:RightHand",
-  "Bip001-L-Thigh": "mixamorig:LeftUpLeg",
-  "Bip001-L-Calf": "mixamorig:LeftLeg",
-  "Bip001-L-Toe0": "mixamorig:LeftToeBase",
-  "Bip001-L-Foot": "mixamorig:LeftFoot",
-  "Bip001-R-Thigh": "mixamorig:RightUpLeg",
-  "Bip001-R-Calf": "mixamorig:RightLeg",
-  "Bip001-R-Toe0": "mixamorig:RightToeBase",
-  "Bip001-R-Foot": "mixamorig:RightFoot",
+  "Bip001-Pelvis": "mixamorigHips",
+  "Bip001-Spine2": "mixamorigSpine2",
+  "Bip001-Spine1": "mixamorigSpine1",
+  "Bip001-Spine": "mixamorigSpine",
+  "Bip001-Neck": "mixamorigNeck",
+  "Bip001-Head": "mixamorigHead",
+  "Bip001-L-Clavicle": "mixamorigLeftShoulder",
+  "Bip001-L-UpperArm": "mixamorigLeftArm",
+  "Bip001-L-Forearm": "mixamorigLeftForeArm",
+  "Bip001-L-Hand": "mixamorigLeftHand",
+  "Bip001-R-Clavicle": "mixamorigRightShoulder",
+  "Bip001-R-UpperArm": "mixamorigRightArm",
+  "Bip001-R-Forearm": "mixamorigRightForeArm",
+  "Bip001-R-Hand": "mixamorigRightHand",
+  "Bip001-L-Thigh": "mixamorigLeftUpLeg",
+  "Bip001-L-Calf": "mixamorigLeftLeg",
+  "Bip001-L-Toe0": "mixamorigLeftToeBase",
+  "Bip001-L-Foot": "mixamorigLeftFoot",
+  "Bip001-R-Thigh": "mixamorigRightUpLeg",
+  "Bip001-R-Calf": "mixamorigRightLeg",
+  "Bip001-R-Toe0": "mixamorigRightToeBase",
+  "Bip001-R-Foot": "mixamorigRightFoot",
 };
 
 /** The character shipped with the game: half a megabyte, gaits included. */
@@ -191,6 +196,19 @@ async function borrowClip(
    * far enough to look like it never loaded at all. Borrow the skeleton, then
    * give it back exactly as it was.
    */
+  // Both ends have to resolve. A target bone that maps to a source name which
+  // does not exist is skipped silently by the retarget, and enough of those
+  // hands back a clip with no tracks in it that still reports itself as a
+  // working walk — which is exactly how the colon in `mixamorig:Hips` hid.
+  const matched = Object.values(names).filter((n) => source.skeleton.getBoneByName(n)).length;
+  if (matched === 0) {
+    console.warn(
+      `[walker] ${name}: none of ${Object.keys(names).length} mapped bones exist in the source rig`,
+      source.skeleton.bones.slice(0, 3).map((b) => b.name),
+    );
+    return null;
+  }
+
   const rest = target.skeleton.bones.map((bone) => ({
     bone,
     position: bone.position.clone(),
