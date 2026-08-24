@@ -26,7 +26,7 @@ const EMPTY_HUD: HudSnapshot = {
 };
 
 /** Rounded size of the car model, for the label before the fetch reports one. */
-const CAR_DOWNLOAD_MB = 18;
+const CAR_DOWNLOAD_MB = 22;
 
 const STICK_RADIUS = 56;
 const STICK_DEADZONE = 0.14;
@@ -412,7 +412,7 @@ export function FlightApp() {
     setCarBytes({ received: 0, total: 0 });
     void import("@/game/car")
       .then(({ downloadCar }) =>
-        downloadCar(`${import.meta.env.BASE_URL}models/lamborghini.glb`, (_f, received, total) =>
+        downloadCar(`${import.meta.env.BASE_URL}models/pagani.glb`, (_f, received, total) =>
           setCarBytes({ received, total }),
         ),
       )

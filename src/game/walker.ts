@@ -1,11 +1,18 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { retargetClip } from "three/addons/utils/SkeletonUtils.js";
 
 /*
  * The character you walk the city as.
  *
- * Half a megabyte, so unlike the Lamborghini it needs no download button and no
- * asset tier — picking Walk fetches it, and the warm-up gate covers the wait.
+ * Two kinds of character are supported, because most rigs you can actually get
+ * hold of do not come with a walk cycle:
+ *
+ *   - one whose own file carries the gaits (the CC0 robot), and
+ *   - one that carries only a pose, with the gaits retargeted onto it from
+ *     Mixamo clips at load time.
+ *
  * Provenance and licence are in `public/models/CREDITS.md`.
  */
 
@@ -16,7 +23,7 @@ const TARGET_HEIGHT = 1.78;
  * Ground speeds the clips were authored around, m/s.
  *
  * The stride is stretched by `speed / reference` so the feet keep up with the
- * ground rather than skating over it. Both were read off the model by eye —
+ * ground rather than skating over it. Both were read off the models by eye —
  * there is nothing in a glTF that states the speed a walk cycle assumes.
  */
 const WALK_REFERENCE = 1.35;
@@ -26,23 +33,81 @@ const STRIDE_RANGE = { min: 0.55, max: 1.9 };
 /** Seconds to cross from one clip to another. */
 const BLEND = 0.18;
 
-/**
- * Kept here rather than trusting the HTTP cache: switching city or vehicle
- * rebuilds the sim, and that should re-parse, not re-download.
- */
-let walkerBytes: ArrayBuffer | null = null;
-let walkerDownload: Promise<ArrayBuffer> | null = null;
+export type Gait = "idle" | "walk" | "run";
 
-export function isWalkerDownloaded(): boolean {
-  return walkerBytes !== null;
-}
+export type CharacterSpec = {
+  /** GLB holding the character. */
+  model: string;
+  /** Gaits already inside that file, by clip name or a substring of one. */
+  own?: Partial<Record<Gait, string>>;
+  /** Gaits to bring in from elsewhere (Mixamo .fbx) and retarget onto the rig. */
+  borrow?: Partial<Record<Gait, string>>;
+  /**
+   * Target-rig bone prefixes against the source rig's bone names, for the
+   * retarget. Only mapped bones are driven — hair, skirts, fingers and props
+   * keep their bind pose, which is what you want from a borrowed clip.
+   */
+  boneMap?: Record<string, string>;
+};
+
+/**
+ * 3ds Max Biped against Mixamo, the two rigs this game has met.
+ *
+ * Keys are prefixes: a Sketchfab export appends `_06`, `_0198` and so on to
+ * every node, and those numbers change every time the file is re-exported, so
+ * matching on the stem is the only stable way to find a bone.
+ */
+const BIPED_FROM_MIXAMO: Record<string, string> = {
+  "Bip001-Pelvis": "mixamorig:Hips",
+  "Bip001-Spine2": "mixamorig:Spine2",
+  "Bip001-Spine1": "mixamorig:Spine1",
+  "Bip001-Spine": "mixamorig:Spine",
+  "Bip001-Neck": "mixamorig:Neck",
+  "Bip001-Head": "mixamorig:Head",
+  "Bip001-L-Clavicle": "mixamorig:LeftShoulder",
+  "Bip001-L-UpperArm": "mixamorig:LeftArm",
+  "Bip001-L-Forearm": "mixamorig:LeftForeArm",
+  "Bip001-L-Hand": "mixamorig:LeftHand",
+  "Bip001-R-Clavicle": "mixamorig:RightShoulder",
+  "Bip001-R-UpperArm": "mixamorig:RightArm",
+  "Bip001-R-Forearm": "mixamorig:RightForeArm",
+  "Bip001-R-Hand": "mixamorig:RightHand",
+  "Bip001-L-Thigh": "mixamorig:LeftUpLeg",
+  "Bip001-L-Calf": "mixamorig:LeftLeg",
+  "Bip001-L-Toe0": "mixamorig:LeftToeBase",
+  "Bip001-L-Foot": "mixamorig:LeftFoot",
+  "Bip001-R-Thigh": "mixamorig:RightUpLeg",
+  "Bip001-R-Calf": "mixamorig:RightLeg",
+  "Bip001-R-Toe0": "mixamorig:RightToeBase",
+  "Bip001-R-Foot": "mixamorig:RightFoot",
+};
+
+/** The character shipped with the game: half a megabyte, gaits included. */
+export const ROBOT: CharacterSpec = {
+  model: "models/robot.glb",
+  own: { idle: "Idle", walk: "Walking", run: "Running" },
+};
+
+/**
+ * The stand-in the game actually wants to wear. Her own file holds a single
+ * standing pose, so walking and running are borrowed from Mixamo and retargeted
+ * onto her Biped rig.
+ */
+export const LACRIMOSA: CharacterSpec = {
+  model: "models/lacrimosa.glb",
+  own: { idle: "stand" },
+  borrow: { walk: "models/anim-walk.fbx", run: "models/anim-run.fbx" },
+  boneMap: BIPED_FROM_MIXAMO,
+};
 
 export type Walker = {
   group: THREE.Group;
   /** Where the eyes sit, character-local, for the first-person view. */
   eyePoint: THREE.Vector3;
-  /** Height in metres after scaling — the walk probe uses it for headroom. */
+  /** Height in metres after scaling. */
   height: number;
+  /** Which gaits actually resolved — the answer to "did the retarget work?". */
+  gaits: Gait[];
   /**
    * Advance the animation. `speed` is ground speed in m/s, signed: walking
    * backwards runs the cycle backwards rather than moonwalking forwards.
@@ -56,24 +121,79 @@ function clamp(v: number, min: number, max: number) {
 }
 
 /**
- * Load the character and normalise it into this sim's frame: metres, feet on
+ * Kept here rather than trusting the HTTP cache: switching city or vehicle
+ * rebuilds the sim, and that should re-parse, not re-download.
+ */
+const cache = new Map<string, ArrayBuffer>();
+
+async function bytes(url: string): Promise<ArrayBuffer> {
+  const held = cache.get(url);
+  if (held) return held;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`character asset: HTTP ${res.status} for ${url}`);
+  const buf = await res.arrayBuffer();
+  cache.set(url, buf);
+  return buf;
+}
+
+function firstSkinnedMesh(root: THREE.Object3D): THREE.SkinnedMesh | null {
+  let found: THREE.SkinnedMesh | null = null;
+  root.traverse((obj) => {
+    const mesh = obj as THREE.SkinnedMesh;
+    if (!found && mesh.isSkinnedMesh) found = mesh;
+  });
+  return found;
+}
+
+function findClip(clips: THREE.AnimationClip[], want: string | undefined) {
+  if (!want) return undefined;
+  return (
+    clips.find((c) => c.name === want) ??
+    clips.find((c) => c.name.toLowerCase().includes(want.toLowerCase()))
+  );
+}
+
+/**
+ * Borrow a clip from another rig.
+ *
+ * The source hip translation is deliberately dropped — `options.hip` is left at
+ * its default, which matches no bone here, so no position track comes out. The
+ * sim moves the character across the ground; a clip that also carried its own
+ * forward motion would fight it and double the speed.
+ */
+async function borrowClip(
+  url: string,
+  target: THREE.SkinnedMesh,
+  boneMap: Record<string, string>,
+  name: string,
+): Promise<THREE.AnimationClip | null> {
+  const fbx = new FBXLoader().parse(await bytes(url), "");
+  const source = firstSkinnedMesh(fbx);
+  const clip = fbx.animations[0];
+  if (!source || !clip) return null;
+
+  // Map by prefix: `Bip001-L-Foot_0180` is the same bone as `Bip001-L-Foot`.
+  const names: Record<string, string> = {};
+  for (const bone of target.skeleton.bones) {
+    for (const [stem, sourceName] of Object.entries(boneMap)) {
+      if (bone.name === stem || bone.name.startsWith(`${stem}_`)) {
+        names[bone.name] = sourceName;
+        break;
+      }
+    }
+  }
+
+  const retargeted = retargetClip(target, source, clip, { names });
+  retargeted.name = name;
+  return retargeted;
+}
+
+/**
+ * Load a character and normalise it into this sim's frame: metres, feet on
  * y = 0, nose along +Z like everything else here.
  */
-export async function loadWalker(url: string): Promise<Walker> {
-  if (!walkerBytes) {
-    walkerDownload ??= (async () => {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`character: HTTP ${res.status}`);
-      return res.arrayBuffer();
-    })().catch((err) => {
-      walkerDownload = null;
-      throw err;
-    });
-    walkerBytes = await walkerDownload;
-  }
-  // Parse a copy: GLTFLoader may take ownership of the buffer it is handed,
-  // and these bytes are kept for the next time the sim is rebuilt.
-  const gltf = await new GLTFLoader().parseAsync(walkerBytes.slice(0), "");
+export async function loadWalker(spec: CharacterSpec, base: string): Promise<Walker> {
+  const gltf = await new GLTFLoader().parseAsync((await bytes(base + spec.model)).slice(0), "");
   const source = gltf.scene;
   source.updateMatrixWorld(true);
 
@@ -98,29 +218,44 @@ export async function loadWalker(url: string): Promise<Walker> {
   source.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh) return;
-    // The city is lit by hemisphere plus two directionals with no shadow map;
-    // a character that casts none but reads as matte sits in it convincingly.
+    // A skinned mesh's bounds are its bind pose, which a walk cycle leaves —
+    // culling against them pops limbs out of existence at the screen edge.
     mesh.frustumCulled = false;
-    const mat = mesh.material as THREE.MeshStandardMaterial;
-    if (mat && "metalness" in mat) mat.metalness = Math.min(mat.metalness, 0.2);
   });
 
-  const mixer = new THREE.AnimationMixer(source);
-  const clip = (name: string) => gltf.animations.find((a) => a.name === name);
-  const idleClip = clip("Idle");
-  const walkClip = clip("Walking");
-  const runClip = clip("Running");
+  const skinned = firstSkinnedMesh(source);
+  /*
+   * The mixer is rooted at the skinned mesh, not the scene: both the clips that
+   * came with the file (`Bip001-Head_083.quaternion`) and the retargeted ones
+   * (`.bones[Bip001-Head_083].quaternion`) resolve through its skeleton, so one
+   * mixer can blend across both without re-pathing either.
+   */
+  const mixer = new THREE.AnimationMixer(skinned ?? source);
 
-  const action = (c: THREE.AnimationClip | undefined) => {
-    if (!c) return null;
-    const a = mixer.clipAction(c);
+  const clips: Partial<Record<Gait, THREE.AnimationClip>> = {};
+  for (const gait of ["idle", "walk", "run"] as Gait[]) {
+    const own = findClip(gltf.animations, spec.own?.[gait]);
+    if (own) clips[gait] = own;
+  }
+  if (skinned && spec.borrow && spec.boneMap) {
+    for (const gait of ["idle", "walk", "run"] as Gait[]) {
+      const url = spec.borrow[gait];
+      if (!url) continue;
+      const borrowed = await borrowClip(base + url, skinned, spec.boneMap, gait);
+      if (borrowed) clips[gait] = borrowed;
+    }
+  }
+
+  const action = (clip: THREE.AnimationClip | undefined) => {
+    if (!clip) return null;
+    const a = mixer.clipAction(clip);
     a.play();
     a.setEffectiveWeight(0);
     return a;
   };
-  const idle = action(idleClip);
-  const walk = action(walkClip);
-  const run = action(runClip);
+  const idle = action(clips.idle);
+  const walk = action(clips.walk);
+  const run = action(clips.run);
   if (idle) idle.setEffectiveWeight(1);
 
   /** Current blend weights, eased toward the target so gait changes glide. */
@@ -164,10 +299,11 @@ export async function loadWalker(url: string): Promise<Walker> {
     // Eyes just under the crown; the head is the top of the bounding box.
     eyePoint: new THREE.Vector3(0, height * 0.92, 0.12),
     height,
+    gaits: (Object.keys(clips) as Gait[]).filter((g) => clips[g]),
     update,
     dispose: () => {
       mixer.stopAllAction();
-      mixer.uncacheRoot(source);
+      mixer.uncacheRoot(skinned ?? source);
       group.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
         if (!mesh.isMesh) return;

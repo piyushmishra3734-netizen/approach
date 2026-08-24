@@ -11,8 +11,8 @@ import {
 } from "3d-tiles-renderer/three/plugins";
 import { CITIES, CITY_ORDER, ION_GOOGLE_TILES, ION_TOKEN, type City, type CityId } from "./cities";
 import { createCraft } from "./craft";
-import { loadCar, WHEEL_IDS, type CarModel } from "./car";
-import { loadWalker, type Walker } from "./walker";
+import { loadCar, PAGANI_RIG, WHEEL_IDS, type CarModel } from "./car";
+import { loadWalker, LACRIMOSA, type Walker } from "./walker";
 import { createInput, type InputHandle } from "./input";
 import { createEngineAudio, type EngineAudio } from "./audio";
 
@@ -386,10 +386,10 @@ export function createSim(
   craft.visible = vehicle === "plane";
   scene.add(craft);
 
-  // The Lamborghini is ~18 MB, so it is only fetched when someone picks the car
+  // The Pagani is ~22 MB, so it is only fetched when someone picks the car
   // — a flight never pays for it.
   if (vehicle === "car") {
-    void loadCar(`${import.meta.env.BASE_URL}models/lamborghini.glb`)
+    void loadCar(`${import.meta.env.BASE_URL}models/pagani.glb`, PAGANI_RIG)
       .then((loaded) => {
         if (disposed) {
           loaded.dispose();
@@ -410,7 +410,7 @@ export function createSim(
   // Half a megabyte, so no download button: picking Walk fetches it and the
   // warm-up gate covers the wait.
   if (vehicle === "walk") {
-    void loadWalker(`${import.meta.env.BASE_URL}models/robot.glb`)
+    void loadWalker(LACRIMOSA, import.meta.env.BASE_URL)
       .then((loaded) => {
         if (disposed) {
           loaded.dispose();
@@ -794,11 +794,12 @@ export function createSim(
 
     const restY = groundHeightAt(pose.x, pose.y, pose.z, GROUND_PROBE_DOWN, WALK_PROBE_UP);
     if (restY === null) {
-      // Walked off the edge of what has streamed in. Stay put rather than
-      // stepping into nothing, and wait for the tiles to catch up.
+      // Nothing has streamed in under the next step yet. Hold position and try
+      // again next frame, but keep the speed: a probe coming back empty while
+      // tiles refine is routine, and zeroing it there stops the walk dead every
+      // few frames. The car tolerates the same gap the same way.
       pose.x = prevX;
       pose.z = prevZ;
-      pose.speed = 0;
       return;
     }
     // Compare against the surface underfoot last frame, not the body: measuring
@@ -1037,6 +1038,7 @@ export function createSim(
       craft: body().position.toArray(),
       vehicle,
       flying,
+      character: walker ? { height: +walker.height.toFixed(2), gaits: walker.gaits } : null,
       steer: steerAngle,
       wheelRadius: car?.wheelRadius ?? null,
       speed: pose.speed,
