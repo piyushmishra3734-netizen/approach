@@ -24,19 +24,19 @@ export type RigSpec = {
 /**
  * Pagani Huayra Codalunga (public/models/pagani.glb). The export names every
  * node `Object_N`, so the hubs below were measured from the mesh: the front
- * axle sits at z = -0.285, the rear at +0.294, and the nose points down -Z —
- * hence the half-turn yaw. The rim rings kiss y = 0, so hub height is the
- * rolling radius.
+ * axle sits at z = +0.294, the rear at -0.285, and the nose points up +Z —
+ * confirmed in-game, so no yaw correction is applied. The rim rings kiss
+ * y = 0, so hub height is the rolling radius.
  */
 export const PAGANI_RIG: RigSpec = {
   wheels: {
-    frontLeft: [-0.19, 0.075, -0.285],
-    frontRight: [0.19, 0.075, -0.285],
-    rearLeft: [-0.19, 0.07, 0.294],
-    rearRight: [0.19, 0.07, 0.294],
+    frontLeft: [-0.19, 0.07, 0.294],
+    frontRight: [0.19, 0.07, 0.294],
+    rearLeft: [-0.19, 0.075, -0.285],
+    rearRight: [0.19, 0.075, -0.285],
   },
   wheelRadius: 0.075,
-  noseYaw: Math.PI,
+  noseYaw: 0,
   targetLength: 4.62,
 };
 
