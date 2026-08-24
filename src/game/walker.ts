@@ -183,7 +183,26 @@ async function borrowClip(
     }
   }
 
+  /*
+   *  samples by driving the target skeleton itself, and leaves it
+   * standing in the source's last frame — positions and scales included, at the
+   * source rig's units. The clips it returns are rotation-only, so nothing ever
+   * puts those back, and a mesh skinned to centimetre-scale bones is scattered
+   * far enough to look like it never loaded at all. Borrow the skeleton, then
+   * give it back exactly as it was.
+   */
+  const rest = target.skeleton.bones.map((bone) => ({
+    bone,
+    position: bone.position.clone(),
+    quaternion: bone.quaternion.clone(),
+    scale: bone.scale.clone(),
+  }));
   const retargeted = retargetClip(target, source, clip, { names });
+  for (const held of rest) {
+    held.bone.position.copy(held.position);
+    held.bone.quaternion.copy(held.quaternion);
+    held.bone.scale.copy(held.scale);
+  }
   retargeted.name = name;
   return retargeted;
 }
