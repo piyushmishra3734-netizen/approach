@@ -13,6 +13,7 @@ import { CITIES, CITY_ORDER, ION_GOOGLE_TILES, ION_TOKEN, type City, type CityId
 import { createCraft } from "./craft";
 import { loadCar, WHEEL_IDS, type CarModel } from "./car";
 import { createInput, type InputHandle } from "./input";
+import { createEngineAudio, type EngineAudio } from "./audio";
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
@@ -112,8 +113,15 @@ const WALL_PROBE_UP = 120;
 /** Suspension smoothing. Raw photogrammetry is lumpy at wheel scale. */
 const CAR_BODY_SMOOTH = 9;
 const CAR_TILT_SMOOTH = 5.5;
-const CAR_CHASE_OFFSET = new THREE.Vector3(0, 2.15, -7.4);
-const CAR_CHASE_LOOK = new THREE.Vector3(0, 0.9, 9);
+/*
+ * Car chase cam. Sat 7.4 m back, which put three car lengths of empty road
+ * between the player and the Lamborghini and made it read as something being
+ * watched rather than driven. Pulled in to just over a car length behind the
+ * rear bumper, and a shade lower, so the body fills the frame and the kerb
+ * still shows.
+ */
+const CAR_CHASE_OFFSET = new THREE.Vector3(0, 1.9, -5.5);
+const CAR_CHASE_LOOK = new THREE.Vector3(0, 0.85, 8.5);
 
 const CHASE_OFFSET = new THREE.Vector3(0, 6.0, -30);
 const CHASE_LOOK = new THREE.Vector3(0, 0.45, 20);
@@ -121,6 +129,44 @@ const COCKPIT_OFFSET = new THREE.Vector3(0, 1.05, 2.4);
 const COCKPIT_LOOK = new THREE.Vector3(0, 0.35, 40);
 /** Chase cam takes a sliver of bank so the plane, not the world, does the rolling. */
 const CHASE_BANK = 0.12;
+
+/**
+ * How far the world is streamed and drawn, in metres, per vehicle.
+ *
+ * This is the streaming budget, not just a view setting. The tile renderer
+ * only refines what is inside the camera frustum, so the far plane is what
+ * decides how much city gets downloaded: at 48 km it traversed the whole
+ * metropolis at coarse detail before the street under the spawn was sharp.
+ * A short far plane keeps the requests to a bubble around the player.
+ *
+ * The car sees less than the plane because it never leaves the street and
+ * moves at a third of the speed — 2.4 km of visible city is a long way down
+ * a boulevard.
+ */
+const VIEW_DISTANCE: Record<Vehicle, number> = { plane: 7000, car: 3000 };
+/** Haze closes the view before the streamed bubble ends, so nothing pops in. */
+const FOG_NEAR = 0.2;
+const FOG_FAR = 0.8;
+/** Sky sits outside the fog and inside the far plane. */
+const SKY_RADIUS = 0.9;
+
+/**
+ * Tiles that have to be drawn before the world is worth starting in.
+ *
+ * The frame loop runs from the moment the sim is built, with the camera
+ * already parked at the spawn, so the city streams in under the menu while the
+ * player is still reading it. Without a gate the Fly button was live before any
+ * of that had arrived and the first few seconds of every game were empty blue
+ * sky — the load rail read 100% throughout, because `loadProgress` reports a
+ * drained queue as finished whether or not anything was ever queued.
+ */
+const WARMUP_TILES = 12;
+/**
+ * ...and the gate opens after this long regardless. On a throttled connection,
+ * or with the tileset down entirely, flying an empty sky beats staring at a
+ * disabled button.
+ */
+const WARMUP_TIMEOUT = 12;
 
 export type CameraMode = "chase" | "cockpit";
 export type Vehicle = "plane" | "car";
@@ -144,6 +190,10 @@ export type HudSnapshot = {
   blocked: boolean;
   /** Car only: false while the model or the street under it is still loading. */
   onRoad: boolean;
+  /** True once enough of the spawn view has drawn to start in a real city. */
+  worldReady: boolean;
+  /** Progress toward `worldReady`, 0..1, for the menu's load rail. */
+  warmup: number;
   error: string | null;
 };
 
@@ -154,6 +204,8 @@ export type SimHandle = {
   /** Put the vehicle back at the spawn — the R key, for the touch UI. */
   restart: () => void;
   setFlying: (v: boolean) => void;
+  /** High asset tier only: engine audio on or off, live. */
+  setSound: (on: boolean) => void;
   setTouch: (partial: Partial<{ pitch: number; roll: number; yaw: number; throttle: number }>) => void;
 };
 
@@ -207,8 +259,8 @@ function spawnPose(city: City, vehicle: Vehicle = "plane"): Pose {
   return { ...base, y: city.height, pitch: city.el, speed: 48, throttle: 0.42 };
 }
 
-function createSky() {
-  const geo = new THREE.SphereGeometry(12000, 32, 16);
+function createSky(radius: number) {
+  const geo = new THREE.SphereGeometry(radius, 32, 16);
   const mat = new THREE.MeshBasicMaterial({
     color: 0x8eb4d2,
     side: THREE.BackSide,
@@ -235,6 +287,7 @@ export function createSim(
   onHud: (hud: HudSnapshot) => void,
   initialCity: CityId = "sf",
   vehicle: Vehicle = "plane",
+  soundOn = false,
 ): SimHandle {
   let city = CITIES[initialCity] ?? CITIES.sf;
   let pose = spawnPose(city, vehicle);
@@ -248,6 +301,15 @@ export function createSim(
   let wheelSpin = 0;
   let blocked = false;
   let car: CarModel | null = null;
+  /**
+   * Car only: the throttle the player is actually asking for. `pose.throttle`
+   * is a speed readout for the HUD in the car, not a demand, and an engine
+   * driven off it never lifts.
+   */
+  let carThrottle = 0;
+  let engineAudio: EngineAudio | null = null;
+  let audioWanted = soundOn;
+  let audioLoading = false;
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -265,11 +327,13 @@ export function createSim(
   renderer.domElement.style.touchAction = "none";
   container.appendChild(renderer.domElement);
 
+  const view = VIEW_DISTANCE[vehicle];
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x8eb4d2);
-  scene.fog = new THREE.Fog(0x9cb6c8, 2500, 28000);
+  scene.fog = new THREE.Fog(0x9cb6c8, view * FOG_NEAR, view * FOG_FAR);
 
-  const camera = new THREE.PerspectiveCamera(68, 1, 1, 48000);
+  const camera = new THREE.PerspectiveCamera(68, 1, 1, view);
   scene.add(camera);
 
   scene.add(new THREE.HemisphereLight(0xe8f0f6, 0x5a584e, 1.15));
@@ -280,7 +344,7 @@ export function createSim(
   fill.position.set(2, 1.4, -1.5);
   scene.add(fill);
 
-  const sky = createSky();
+  const sky = createSky(view * SKY_RADIUS);
   scene.add(sky.mesh);
 
   const craft = createCraft();
@@ -338,11 +402,19 @@ export function createSim(
 
   let tilesReady = false;
   let tilesError: string | null = null;
+  /** Warm-up: has the spawn view drawn enough to hand the player the controls? */
+  let worldReady = false;
+  let warmupClock = 0;
+  /** Set when the tile queue drains — a small view can be complete under the bar. */
+  let tilesDrained = false;
   tiles.addEventListener("load-root-tileset", () => {
     tilesReady = true;
     tilesError = null;
     reorient.transformLatLonHeightToOrigin(spawnLatLon().lat, spawnLatLon().lon, 0);
     emitHud();
+  });
+  tiles.addEventListener("tiles-load-end", () => {
+    tilesDrained = true;
   });
   tiles.addEventListener("load-model", (event) => {
     const sceneRoot = (event as { scene?: THREE.Object3D }).scene;
@@ -444,6 +516,11 @@ export function createSim(
     steerAngle = 0;
     blocked = false;
     reorient.transformLatLonHeightToOrigin(spawnLatLon().lat, spawnLatLon().lon, 0);
+    // A new city (or a restart) re-centres the tileset, so the world has to
+    // draw itself again before it is worth starting in.
+    worldReady = false;
+    warmupClock = 0;
+    tilesDrained = false;
     camInitialized = false;
     applyPoseToCraft();
     placeCamera(1);
@@ -598,6 +675,7 @@ export function createSim(
     // steering path. Proved by the control self-test, do not "fix" it blind.
     const steerInput = -axes.roll;
     const throttleInput = axes.pitch;
+    carThrottle = Math.max(0, throttleInput);
 
     // Speed. Brake first, then reverse; drag always pulls back toward zero.
     const speedFactor = 1 / (1 + Math.abs(pose.speed) / CAR_STEER_FALLOFF);
@@ -739,6 +817,8 @@ export function createSim(
       speedKph: pose.speed * 3.6,
       blocked,
       onRoad: vehicle !== "car" || carGrounded,
+      worldReady,
+      warmup: worldReady ? 1 : clamp(tiles.visibleTiles.size / WARMUP_TILES, 0, 1),
       error: tilesError,
     });
   }
@@ -774,6 +854,7 @@ export function createSim(
       cam: camera.position.toArray(),
       craft: body().position.toArray(),
       vehicle,
+      flying,
       steer: steerAngle,
       wheelRadius: car?.wheelRadius ?? null,
       speed: pose.speed,
@@ -800,8 +881,64 @@ export function createSim(
       tris: renderer.info.render.triangles,
       visible: tiles.visibleTiles.size,
       ready: tilesReady,
+      worldReady,
+      audioWanted,
+      audioOn: engineAudio !== null,
+      audioLoading,
+      warmupClock,
+      tilesDrained,
+      tilesError,
     };
   };
+
+  /**
+   * Build the engine audio, once, from inside a user gesture.
+   *
+   * Every browser refuses to start an AudioContext outside one, so this is
+   * only ever reached from the start press or the settings toggle — never from
+   * the frame loop.
+   */
+  function ensureAudio() {
+    if (!audioWanted || engineAudio || audioLoading) return;
+    audioLoading = true;
+    void createEngineAudio(vehicle, import.meta.env.BASE_URL)
+      .then((made) => {
+        audioLoading = false;
+        if (!made) return;
+        // The player may have switched it off again, or left, while the pack
+        // was downloading.
+        if (disposed || !audioWanted) {
+          made.dispose();
+          return;
+        }
+        engineAudio = made;
+        engineAudio.setMuted(!flying);
+      })
+      .catch((err) => {
+        audioLoading = false;
+        console.error("[sim] engine audio failed:", err);
+      });
+  }
+
+  /**
+   * Decide when the spawn view has enough city in it to start.
+   *
+   * Counting drawn tiles rather than watching `loadProgress`: the queue is
+   * empty before the first request goes out, so progress reads 1 at boot and
+   * says nothing about whether there is a city on screen yet.
+   */
+  function updateWarmup(dt: number) {
+    warmupClock += dt;
+    if (tilesError || warmupClock >= WARMUP_TIMEOUT) {
+      worldReady = true;
+      return;
+    }
+    if (!tilesReady) return;
+    const drawn = tiles.visibleTiles.size;
+    // A spawn that needs fewer than WARMUP_TILES tiles to cover the view is
+    // finished when the queue drains, so take that as done too.
+    if (drawn >= WARMUP_TILES || (tilesDrained && drawn > 0)) worldReady = true;
+  }
 
   function frame() {
     if (disposed) return;
@@ -834,8 +971,19 @@ export function createSim(
     tiles.update();
     renderer.render(scene, camera);
 
+    engineAudio?.update({
+      speed: pose.speed,
+      topSpeed: vehicle === "car" ? CAR_TOP_SPEED : MAX_SPEED,
+      throttle: vehicle === "car" ? carThrottle : pose.throttle,
+    });
+
+    if (!worldReady) {
+      updateWarmup(dt);
+      if (worldReady) emitHud();
+    }
+
     hudClock += dt;
-    const streaming = !tilesReady || (tiles.loadProgress ?? 0) < 0.95;
+    const streaming = !worldReady || !tilesReady || (tiles.loadProgress ?? 0) < 0.95;
     if (hudClock > (streaming ? 0.05 : 0.12)) {
       hudClock = 0;
       emitHud();
@@ -850,6 +998,7 @@ export function createSim(
       renderer.setAnimationLoop(null);
       ro.disconnect();
       input.dispose();
+      engineAudio?.dispose();
       tiles.dispose();
       dracoLoader.dispose();
       renderer.dispose();
@@ -863,6 +1012,10 @@ export function createSim(
     start: () => {
       flying = true;
       pose.throttle = Math.max(pose.throttle, 0.4);
+      // This call is inside the click or keypress that started the game, which
+      // is the only moment an AudioContext is allowed to open.
+      ensureAudio();
+      engineAudio?.setMuted(false);
       emitHud();
     },
     setCity: (id) => {
@@ -877,7 +1030,20 @@ export function createSim(
     },
     setFlying: (v) => {
       flying = v;
+      // Pausing kills the engine note rather than leaving it droning under the
+      // pause card.
+      engineAudio?.setMuted(!v);
       emitHud();
+    },
+    setSound: (on) => {
+      audioWanted = on;
+      if (on) {
+        ensureAudio();
+        engineAudio?.setMuted(!flying);
+      } else {
+        engineAudio?.dispose();
+        engineAudio = null;
+      }
     },
     setTouch: (partial) => {
       if (partial.pitch != null) input.touch.pitch = partial.pitch;

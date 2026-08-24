@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Maximize, Menu, Minimize, RotateCw } from "lucide-react";
+import { Maximize, Menu, Minimize, RotateCw, Settings } from "lucide-react";
 import { CITIES, CITY_ORDER, type CityId } from "@/game/cities";
 import type { HudSnapshot, SimHandle, Vehicle } from "@/game/sim";
 
@@ -20,6 +20,8 @@ const EMPTY_HUD: HudSnapshot = {
   speedKph: 0,
   blocked: false,
   onRoad: true,
+  worldReady: false,
+  warmup: 0,
   error: null,
 };
 
@@ -30,9 +32,63 @@ const STICK_RADIUS = 56;
 const STICK_DEADZONE = 0.14;
 const CITY_KEY = "approach.city";
 const VEHICLE_KEY = "approach.vehicle";
+const ASSETS_KEY = "approach.assets";
+
+/**
+ * How much the game is allowed to download beyond the city tiles.
+ *
+ * Low is the default and is the game as it shipped: nothing extra, and silent.
+ * High buys engine audio — the sampled car loops plus the synthesised plane —
+ * and anything else added later belongs here rather than in the default path.
+ */
+type AssetTier = "low" | "high";
+
+/** Rounded size of the sound pack, for the label before the fetch reports one. */
+const AUDIO_PACK_KB = 110;
+
+/** How far the menu has to be dragged down before a release reloads, px. */
+const PULL_TRIGGER = 96;
+/** Where the indicator stops following the finger, px. */
+const PULL_MAX = 150;
+
+/**
+ * What Ctrl+Shift+R does, for a phone that has no Ctrl.
+ *
+ * A plain `location.reload()` is not enough on a device that has installed the
+ * app: a service worker will happily serve the same stale shell back. So the
+ * worker and its caches go first, and the reload carries a one-shot query so
+ * the document itself cannot come from the HTTP cache either. The parameter is
+ * stripped from the address bar once the new page is up.
+ */
+async function hardReload() {
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((reg) => reg.unregister()));
+    }
+  } catch {
+    /* unavailable, or blocked in private mode — the reload still helps */
+  }
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    }
+  } catch {
+    /* same */
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("r", Date.now().toString(36));
+  // `replace`, not `assign`: a reload is not a place in the history.
+  window.location.replace(url.toString());
+}
 
 function mb(bytes: number) {
   return (bytes / 1048576).toFixed(1);
+}
+
+function kb(bytes: number) {
+  return Math.round(bytes / 1024);
 }
 
 function padHeading(deg: number) {
@@ -64,6 +120,15 @@ function readStoredCity(): CityId {
   return "sf";
 }
 
+function readStoredAssets(): AssetTier {
+  try {
+    if (localStorage.getItem(ASSETS_KEY) === "high") return "high";
+  } catch {
+    /* private mode */
+  }
+  return "low";
+}
+
 function readStoredVehicle(): Vehicle {
   try {
     const v = localStorage.getItem(VEHICLE_KEY);
@@ -79,6 +144,7 @@ function loadLabel(simReady: boolean, hud: HudSnapshot, progress: number, bootEr
   if (!simReady) return "Loading engine";
   if (hud.error && !hud.ready) return "Tiles unavailable";
   if (!hud.ready) return "Streaming city";
+  if (!hud.worldReady) return `Building the city · ${Math.round(hud.warmup * 100)}%`;
   if (progress < 100) return `${progress}%`;
   return "Ready";
 }
@@ -91,7 +157,10 @@ export function FlightApp() {
   const offsetRef = useRef({ x: 0, y: 0 });
   const cityRef = useRef<CityId>("sf");
   const vehicleRef = useRef<Vehicle>("plane");
+  const assetsRef = useRef<AssetTier>("low");
   const pendingStart = useRef(false);
+  /** Latest `hud.worldReady`, so the start gate does not re-bind the key handler. */
+  const worldReadyRef = useRef(false);
   const resumeBtnRef = useRef<HTMLButtonElement>(null);
   const flyBtnRef = useRef<HTMLButtonElement>(null);
   const [hud, setHud] = useState<HudSnapshot>(EMPTY_HUD);
@@ -100,6 +169,9 @@ export function FlightApp() {
   const [cityId, setCityId] = useState<CityId>("sf");
   const [vehicle, setVehicle] = useState<Vehicle>("plane");
   const [hintVisible, setHintVisible] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** How far the reload gesture has been dragged, px. 0 when not dragging. */
+  const [pull, setPull] = useState(0);
   const [touchUi, setTouchUi] = useState(false);
   const [simReady, setSimReady] = useState(false);
   const [bootError, setBootError] = useState(false);
@@ -109,24 +181,114 @@ export function FlightApp() {
   const [canFullscreen, setCanFullscreen] = useState(false);
   const [carState, setCarState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
   const [carBytes, setCarBytes] = useState({ received: 0, total: 0 });
+  const [assets, setAssets] = useState<AssetTier>("low");
+  const [packState, setPackState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
+  const [packBytes, setPackBytes] = useState({ received: 0, total: 0 });
   cityRef.current = cityId;
   vehicleRef.current = vehicle;
+  assetsRef.current = assets;
+  worldReadyRef.current = hud.worldReady;
 
   useEffect(() => {
     const storedCity = readStoredCity();
     if (storedCity !== cityRef.current) setCityId(storedCity);
     const storedVehicle = readStoredVehicle();
     if (storedVehicle !== vehicleRef.current) setVehicle(storedVehicle);
+    const storedAssets = readStoredAssets();
+    if (storedAssets !== assetsRef.current) setAssets(storedAssets);
   }, []);
 
   useEffect(() => {
     try {
       localStorage.setItem(CITY_KEY, cityId);
       localStorage.setItem(VEHICLE_KEY, vehicle);
+      localStorage.setItem(ASSETS_KEY, assets);
     } catch {
       /* private mode */
     }
-  }, [cityId, vehicle]);
+  }, [cityId, vehicle, assets]);
+
+  useEffect(() => {
+    // Tidy the address bar after a pull-to-reload.
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("r")) return;
+    url.searchParams.delete("r");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+
+  /**
+   * Let the browser's own pull-to-refresh work while the game is not being
+   * played. The class relaxes `touch-action` and `overscroll-behavior` on the
+   * document; see the rule in `styles.css` for why they are off by default.
+   */
+  useEffect(() => {
+    const root = document.documentElement;
+    const idle = menu || paused;
+    root.classList.toggle("allow-pull-refresh", idle);
+    return () => root.classList.remove("allow-pull-refresh");
+  }, [menu, paused]);
+
+  /**
+   * Pull down to reload, on the menu and the pause card only.
+   *
+   * The browser's own pull-to-refresh is off for the whole document on
+   * purpose — `touch-action: none` is what stops a downward drag on the flight
+   * stick from reloading the game mid-air. That leaves a phone with no way to
+   * refresh at all, so the gesture is given back exactly where it is safe.
+   */
+  useEffect(() => {
+    if (!(menu || paused)) return;
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+    let distance = 0;
+    let leaving = false;
+    const onLeave = () => {
+      leaving = true;
+    };
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      tracking = true;
+      distance = 0;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!tracking || e.touches.length !== 1) return;
+      const dy = e.touches[0].clientY - startY;
+      const dx = Math.abs(e.touches[0].clientX - startX);
+      // Downward, and more down than sideways — a horizontal swipe is not this.
+      distance = dy > 0 && dx < dy ? Math.min(dy, PULL_MAX) : 0;
+      setPull(distance);
+    };
+    const onEnd = () => {
+      if (!tracking) return;
+      tracking = false;
+      const reached = distance >= PULL_TRIGGER;
+      distance = 0;
+      setPull(0);
+      // The browser may have taken this same drag as its own pull-to-refresh
+      // and already be reloading; a second one on top of it is noise.
+      if (reached && !leaving) void hardReload();
+    };
+
+    window.addEventListener("pagehide", onLeave);
+    window.addEventListener("beforeunload", onLeave);
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onEnd, { passive: true });
+    window.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      setPull(0);
+      window.removeEventListener("pagehide", onLeave);
+      window.removeEventListener("beforeunload", onLeave);
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
+    };
+  }, [menu, paused]);
 
   useEffect(() => {
     const coarse = window.matchMedia("(pointer: coarse)");
@@ -151,21 +313,21 @@ export function FlightApp() {
       .then(({ createSim }) => {
         if (cancelled || !mountRef.current) return;
         try {
-          handle = createSim(mountRef.current, setHud, cityRef.current, vehicleRef.current);
+          handle = createSim(
+            mountRef.current,
+            setHud,
+            cityRef.current,
+            vehicleRef.current,
+            assetsRef.current === "high",
+          );
         } catch {
           setBootError(true);
           return;
         }
         simRef.current = handle;
         setSimReady(true);
-        if (pendingStart.current) {
-          handle.setCity(cityRef.current);
-          handle.start();
-          pendingStart.current = false;
-          setMenu(false);
-          setPaused(false);
-          setHintVisible(true);
-        }
+        // A start that was waiting on this rebuild is not fired here: the new
+        // sim has no city drawn yet. The warm-up effect below releases it.
       })
       .catch(() => {
         if (!cancelled) setBootError(true);
@@ -176,6 +338,9 @@ export function FlightApp() {
       handle?.dispose();
       simRef.current = null;
       setSimReady(false);
+      // The old sim's last snapshot said the world was ready; the new one's
+      // is not, and a stale `worldReady` would wave the player straight in.
+      setHud(EMPTY_HUD);
     };
     // The vehicle is baked into the sim (which model, which dynamics), so
     // switching it rebuilds — only ever from the menu, never mid-drive.
@@ -210,6 +375,35 @@ export function FlightApp() {
     void import("@/game/car").then(({ isCarDownloaded }) => {
       if (isCarDownloaded()) setCarState("ready");
     });
+    void import("@/game/audio").then(({ isPackDownloaded }) => {
+      if (isPackDownloaded()) setPackState("ready");
+    });
+  }, []);
+
+  /**
+   * Switch asset tier. High fetches the sound pack and turns the engine on in
+   * the running sim; the press itself is the user gesture the AudioContext
+   * needs, so the sound starts here or not at all.
+   */
+  const chooseAssets = useCallback((next: AssetTier) => {
+    setAssets(next);
+    assetsRef.current = next;
+    if (next === "low") {
+      simRef.current?.setSound(false);
+      return;
+    }
+    simRef.current?.setSound(true);
+    setPackState((current) => (current === "ready" ? current : "downloading"));
+    void import("@/game/audio")
+      .then(({ isPackDownloaded, downloadAudioPack }) =>
+        isPackDownloaded()
+          ? null
+          : downloadAudioPack(import.meta.env.BASE_URL, (received, total) =>
+              setPackBytes({ received, total }),
+            ),
+      )
+      .then(() => setPackState("ready"))
+      .catch(() => setPackState("failed"));
   }, []);
 
   /** Fetch the car model on an explicit press, showing progress as it comes. */
@@ -245,10 +439,14 @@ export function FlightApp() {
 
   const begin = useCallback(() => {
     if (bootError) return;
-    if (!simRef.current) {
+    // The sim streams the spawn view under the menu. Starting before any of it
+    // has drawn drops the player into blank sky, so an early press is held and
+    // the effect below fires it the moment the city is there.
+    if (!simRef.current || !worldReadyRef.current) {
       pendingStart.current = true;
       return;
     }
+    pendingStart.current = false;
     simRef.current.setCity(cityRef.current);
     simRef.current.start();
     setMenu(false);
@@ -274,6 +472,11 @@ export function FlightApp() {
     },
     [bootError, begin],
   );
+
+  /** Release a start that was pressed before the city had drawn. */
+  useEffect(() => {
+    if (pendingStart.current && hud.worldReady) begin();
+  }, [hud.worldReady, begin]);
 
   const restart = useCallback(() => {
     setPaused(false);
@@ -307,7 +510,10 @@ export function FlightApp() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "Escape") {
-        if (menu) return;
+        if (menu) {
+          setSettingsOpen(false);
+          return;
+        }
         setPaused((p) => {
           const next = !p;
           simRef.current?.setFlying(!next);
@@ -316,6 +522,10 @@ export function FlightApp() {
         });
       }
       if (menu && (e.code === "Enter" || e.code === "Space")) {
+        // Enter anywhere in the menu starts the game — except on a control,
+        // which gets to be a control. Without this, opening Settings or picking
+        // a city from the keyboard also took off.
+        if (document.activeElement instanceof HTMLButtonElement) return;
         e.preventDefault();
         begin();
       }
@@ -421,9 +631,16 @@ export function FlightApp() {
   const rawProgress = hud.progress;
   const progressPct = Math.round(rawProgress > 1 ? rawProgress : rawProgress * 100);
   const progress = Math.min(100, Math.max(0, progressPct));
+  // Before the start the rail tracks the warm-up — how much of the spawn view
+  // has actually drawn. `loadProgress` is no use there: it reads 100% while the
+  // queue is still empty, so the old rail sat full over an empty sky.
+  const railPct = hud.worldReady ? progress : Math.round(hud.warmup * 100);
+  const canStart = simReady && hud.worldReady && !bootError;
   const flying = hud.flying && !paused && !menu;
-  const streaming = !bootError && (!simReady || !hud.ready || progress < 100);
-  const waitRail = streaming && progress <= 2 && !hud.ready;
+  const streaming = !bootError && (!simReady || !hud.worldReady || progress < 100);
+  // Indeterminate shimmer while there is nothing true to report yet: no root
+  // tileset, or a warm-up that has not drawn its first tile.
+  const waitRail = streaming && railPct <= 2 && (!hud.ready || !hud.worldReady);
   const status = loadLabel(simReady, hud, progress, bootError);
   const findingRoad = flying && isCar && !hud.onRoad && !hud.error && !bootError;
   const showStreamChip = flying && (!hud.ready || findingRoad) && !hud.error;
@@ -441,18 +658,39 @@ export function FlightApp() {
         aria-label="Flight viewport"
       />
 
+      {pull > 0 ? (
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0 z-50 flex justify-center pt-safe-t"
+          style={{
+            // Follows the finger at half speed, the way a rubber band does.
+            transform: `translateY(${pull * 0.5}px)`,
+            opacity: Math.min(1, pull / PULL_TRIGGER),
+          }}
+          aria-hidden="true"
+        >
+          <div className="mt-3 flex items-center gap-2 rounded-full border border-line bg-bg/85 px-4 py-2 font-mono text-xs tracking-hud text-fg">
+            <RotateCw
+              className="size-4"
+              strokeWidth={1.75}
+              style={{ rotate: `${pull * 2.4}deg` }}
+            />
+            {pull >= PULL_TRIGGER ? "Release to reload" : "Pull to reload"}
+          </div>
+        </div>
+      ) : null}
+
       <div
         className={`load-rail ${streaming ? "is-on" : ""} ${waitRail ? "is-wait" : ""}`}
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={waitRail ? undefined : progress}
+        aria-valuenow={waitRail ? undefined : railPct}
         aria-label="City tile load"
         aria-hidden={!streaming}
       >
         <div
           className="load-rail-fill"
-          style={waitRail ? undefined : { transform: `scaleX(${progress / 100})` }}
+          style={waitRail ? undefined : { transform: `scaleX(${railPct / 100})` }}
         />
       </div>
 
@@ -501,19 +739,30 @@ export function FlightApp() {
                   ref={flyBtnRef}
                   type="button"
                   onClick={() => startWith("plane")}
-                  disabled={!simReady || bootError}
+                  disabled={!canStart}
                   className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
                     vehicle === "plane"
                       ? "bg-accent text-bg hover:opacity-90"
                       : "border border-line text-fg hover:border-fg/40"
                   }`}
                 >
-                  {bootError ? "Unavailable" : !simReady ? "Preparing" : "Fly"}
+                  {bootError
+                    ? "Unavailable"
+                    : !simReady
+                      ? "Preparing"
+                      : !hud.worldReady
+                        ? "Loading"
+                        : "Fly"}
                 </button>
                 <button
                   type="button"
                   onClick={carState === "ready" ? () => startWith("car") : getCar}
-                  disabled={!simReady || bootError || carState === "downloading"}
+                  disabled={
+                    !simReady ||
+                    bootError ||
+                    carState === "downloading" ||
+                    (carState === "ready" && !hud.worldReady)
+                  }
                   className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
                     vehicle === "car" && carState === "ready"
                       ? "bg-accent text-bg hover:opacity-90"
@@ -525,7 +774,9 @@ export function FlightApp() {
                     : !simReady
                       ? "Preparing"
                       : carState === "ready"
-                        ? "Drive"
+                        ? hud.worldReady
+                          ? "Drive"
+                          : "Loading"
                         : carState === "downloading"
                           ? `${carPercent}%`
                           : carState === "failed"
@@ -574,6 +825,66 @@ export function FlightApp() {
                 </button>
               ))}
             </div>
+
+            <div className="rise rise-6 flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((open) => !open)}
+                aria-expanded={settingsOpen}
+                aria-controls="menu-settings"
+                className={`btn-press flex h-11 w-fit items-center gap-2 font-mono text-sm tracking-hud ${
+                  settingsOpen ? "text-fg" : "text-dim hover:text-muted"
+                }`}
+              >
+                <Settings className="size-4" strokeWidth={1.75} aria-hidden="true" />
+                Settings
+              </button>
+
+              <div
+                id="menu-settings"
+                hidden={!settingsOpen}
+                className="flex flex-col gap-2 border-l border-line pl-4"
+              >
+                <div className="flex items-center gap-4">
+                  <span className="font-mono text-xs tracking-label text-muted uppercase">
+                    Assets
+                  </span>
+                  <div
+                    className="flex gap-1 rounded-md border border-line p-1"
+                    role="group"
+                    aria-label="Asset quality"
+                  >
+                    {(["low", "high"] as AssetTier[]).map((tier) => (
+                      <button
+                        key={tier}
+                        type="button"
+                        onClick={() => chooseAssets(tier)}
+                        aria-pressed={assets === tier}
+                        className={`btn-press h-8 rounded px-4 font-mono text-xs tracking-hud uppercase ${
+                          assets === tier ? "bg-accent text-bg" : "text-dim hover:text-fg"
+                        }`}
+                      >
+                        {tier}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p
+                  className="max-w-sm font-mono text-xs leading-relaxed tracking-hud text-dim"
+                  aria-live="polite"
+                >
+                  {assets === "low"
+                    ? "Low · nothing beyond the city tiles, and no sound."
+                    : packState === "failed"
+                      ? "Sound pack failed — press High again to retry."
+                      : packState === "downloading"
+                        ? `Sound pack · ${kb(packBytes.received)} / ${
+                            packBytes.total ? kb(packBytes.total) : AUDIO_PACK_KB
+                          } KB`
+                        : `High · engine sound for the plane and the car (${AUDIO_PACK_KB} KB).`}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -601,7 +912,7 @@ export function FlightApp() {
             </p>
             <button
               type="button"
-              onClick={() => window.location.reload()}
+              onClick={() => void hardReload()}
               aria-label="Reload the page"
               className="btn-press pointer-events-auto flex size-11 items-center justify-center rounded-md text-fg/80 hover:text-fg"
             >

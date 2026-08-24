@@ -8,6 +8,7 @@ Game code is small and lives in a handful of files:
 
 - `src/game/sim.ts` — flight physics + world update loop
 - `src/game/craft.ts` — aircraft mesh, livery, procedural materials
+- `src/game/audio.ts` — engine sound (High asset tier only; see below)
 - `src/game/input.ts` — keyboard/pointer/touch mapping
 - `src/game/cities.ts` — world/city placement data
 - `src/components/flight-app.tsx` — canvas host, HUD, React shell
@@ -44,6 +45,18 @@ the plugin list in `vite.config.ts`. Own server routes go in `src/routes/`.
 
 Auth and Postgres are pre-wired but **off** (`VITE_AUTH_ENABLED: false`, no
 `migrations/0002_*`). Leave them off unless the app actually needs accounts.
+
+## Asset tiers
+
+Settings in the menu offer **Low** (default) and **High**. Low is the game as
+it shipped: nothing beyond the city tiles, and silent. High downloads
+`public/audio/*.mp3` (~110 KB) and turns on engine audio — sampled loops for
+the car, synthesis for the plane. Anything added later that costs bandwidth
+belongs in High, not in the default path.
+
+Sample provenance and licence are in `public/audio/CREDITS.md`. The car model
+(`public/models/lamborghini.glb`, ~18 MB) stays a separate explicit download
+on its own button — it is not part of the tier.
 
 ## Expiring: the Cesium ion token
 
