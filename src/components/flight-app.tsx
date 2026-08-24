@@ -144,7 +144,7 @@ function readStoredVehicle(): Vehicle {
 function readStoredQuality(): QualityLevel {
   try {
     const v = localStorage.getItem(QUALITY_KEY);
-    if (v === "low" || v === "medium" || v === "high") return v;
+    if (v === "low" || v === "medium" || v === "high" || v === "ultra") return v;
   } catch {
     /* private mode */
   }
@@ -919,7 +919,7 @@ export function FlightApp() {
                     role="group"
                     aria-label="Render quality"
                   >
-                    {(["low", "medium", "high"] as QualityLevel[]).map((level) => (
+                    {(["low", "medium", "high", "ultra"] as QualityLevel[]).map((level) => (
                       <button
                         key={level}
                         type="button"
@@ -940,9 +940,11 @@ export function FlightApp() {
                 >
                   {quality === "low"
                     ? "Low · fastest — softer buildings, for weaker machines."
-                    : quality === "high"
-                      ? "High · sharpest structures, needs a strong GPU and headroom."
-                      : "Medium · crisp buildings that still run light."}
+                    : quality === "medium"
+                      ? "Medium · crisp buildings that still run light."
+                      : quality === "high"
+                        ? "High · sharp structures and filtered textures."
+                        : "Ultra · maximum sharpness — needs a strong GPU, RAM headroom and fast internet."}
                 </p>
                 <div className="flex items-center gap-4">
                   <span className="font-mono text-xs tracking-label text-muted uppercase">

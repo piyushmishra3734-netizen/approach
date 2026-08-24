@@ -215,14 +215,31 @@ export type Vehicle = "plane" | "car" | "walk";
  * heavier; the cache sizes grow with it so the extra detail stays streamed
  * rather than re-fetching on every look-back. Medium is the tuned default:
  * noticeably crisper than the original 10 without drowning an 8 GB laptop.
+ *
+ * Ultra chases errorTarget 3, which is about where Google's own capture
+ * detail runs out — below this the source imagery, not the setting, decides
+ * how sharp things look. It wants a strong GPU, real RAM headroom, and a fast
+ * connection; on anything less the frame rate pays first.
  */
-export type QualityLevel = "low" | "medium" | "high";
+export type QualityLevel = "low" | "medium" | "high" | "ultra";
 
 const QUALITY: Record<QualityLevel, { errorTarget: number; maxCache: number; minCache: number }> = {
   low: { errorTarget: 10, maxCache: 256 * 1024 * 1024, minCache: 128 * 1024 * 1024 },
   medium: { errorTarget: 6, maxCache: 512 * 1024 * 1024, minCache: 256 * 1024 * 1024 },
   high: { errorTarget: 4, maxCache: 768 * 1024 * 1024, minCache: 320 * 1024 * 1024 },
+  ultra: { errorTarget: 3, maxCache: 1024 * 1024 * 1024, minCache: 512 * 1024 * 1024 },
 };
+
+/**
+ * Texture filtering per tier, capped by the GPU's own maximum. Grazing-angle
+ * surfaces — a road running away from the camera, facades seen down a street
+ * — are exactly where plain bilinear sampling smears, and exactly what most
+ * of a city view is. Already-loaded tiles keep whatever they arrived with;
+ * the streaming tail picks up the current tier as it lands.
+ */
+function anisoFor(level: QualityLevel): number {
+  return level === "low" ? 4 : level === "medium" ? 8 : 16;
+}
 
 export type HudSnapshot = {
   ready: boolean;
@@ -517,6 +534,24 @@ export function createSim(
       const mat = mesh.material;
       if (Array.isArray(mat)) mat.forEach(prepareTileMaterial);
       else if (mat) prepareTileMaterial(mat);
+      // Sharpen grazing-angle textures per the current quality tier.
+      const aniso = Math.min(anisoFor(qualityLevel), renderer.capabilities.getMaxAnisotropy());
+      for (const m of Array.isArray(mat) ? mat : [mat]) {
+        if (!m) continue;
+        const std = m as THREE.MeshStandardMaterial;
+        for (const tex of [
+          std.map,
+          std.normalMap,
+          std.roughnessMap,
+          std.metalnessMap,
+          std.aoMap,
+          std.emissiveMap,
+        ]) {
+          if (!tex || tex.anisotropy === aniso) continue;
+          tex.anisotropy = aniso;
+          tex.needsUpdate = true;
+        }
+      }
     });
   });
   tiles.addEventListener("load-error", (event) => {
