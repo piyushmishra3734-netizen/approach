@@ -50,6 +50,8 @@ export type InputHandle = {
   setKeys: (codes: string[] | null) => void;
   consumeViewToggle: () => boolean;
   consumeRestart: () => boolean;
+  /** Walk mode: Space, on the press rather than the hold. */
+  consumeJump: () => boolean;
   dispose: () => void;
 };
 
@@ -60,6 +62,7 @@ export function createInput(): InputHandle {
   let injectedKeys: string[] | null = null;
   let viewEdge = false;
   let restartEdge = false;
+  let jumpEdge = false;
 
   const onDown = (e: KeyboardEvent) => {
     if (e.repeat) return;
@@ -67,6 +70,7 @@ export function createInput(): InputHandle {
     if (GAME_CODES.has(e.code)) e.preventDefault();
     if (e.code === "KeyV") viewEdge = true;
     if (e.code === "KeyR") restartEdge = true;
+    if (e.code === "Space") jumpEdge = true;
   };
   const onUp = (e: KeyboardEvent) => {
     keys.delete(e.code);
@@ -145,6 +149,11 @@ export function createInput(): InputHandle {
     consumeRestart: () => {
       const v = restartEdge;
       restartEdge = false;
+      return v;
+    },
+    consumeJump: () => {
+      const v = jumpEdge;
+      jumpEdge = false;
       return v;
     },
     dispose: () => {

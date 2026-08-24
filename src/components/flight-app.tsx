@@ -644,23 +644,23 @@ export function FlightApp() {
     : 0;
   const controlHint = touchUi
     ? isWalk
-      ? "Stick to walk and turn · Hold thrust to run · Eye button for first person"
+      ? "Stick to walk and turn · Hold Run · Jump button · Eye for first person"
       : isCar
         ? "Stick to steer · Throttle and brake on the right · Eye button for the driver's seat"
         : "Left stick to bank and pitch · Throttle and brake on the right"
     : isWalk
-      ? "W/S walk · A/D turn · Shift to run · V shoulder / first person · R reset · Esc pause"
+      ? "W/S walk · A/D turn · Shift run · Space jump · V view · R reset · Esc pause"
       : isCar
         ? "W/S throttle and brake · A/D steer · V chase / driver's seat · R reset · Esc pause"
         : "W/S pitch · A/D roll · Q/E yaw · Shift throttle · V view · Esc pause";
   const shortHint = touchUi
     ? isWalk
-      ? "Stick to walk · Hold thrust to run"
+      ? "Stick to walk · Hold Run · Jump"
       : isCar
         ? "Stick to steer · Throttle and brake on the right"
         : "Stick to fly · Throttle and brake on the right"
     : isWalk
-      ? "W/S walk · A/D turn · Shift run"
+      ? "W/S walk · Shift run · Space jump"
       : isCar
         ? "W/S throttle · A/D steer · V view"
         : "W/S pitch · A/D roll · Shift throttle";
@@ -1175,29 +1175,43 @@ export function FlightApp() {
               onPointerUp={() => holdThrust("thrust", false)}
               onPointerCancel={() => holdThrust("thrust", false)}
             >
-              Throttle
+              {isWalk ? "Run" : "Throttle"}
             </button>
-            <button
-              type="button"
-              aria-pressed={thrustHeld === "brake"}
-              className={`btn-press h-12 min-w-[5.5rem] touch-none rounded-md border border-line px-4 font-mono text-xs tracking-label uppercase ${
-                thrustHeld === "brake" ? "bg-accent text-bg" : "bg-bg/40 text-fg"
-              }`}
-              onPointerDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                try {
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                } catch {
-                  /* ignore */
-                }
-                holdThrust("brake", true);
-              }}
-              onPointerUp={() => holdThrust("brake", false)}
-              onPointerCancel={() => holdThrust("brake", false)}
-            >
-              Brake
-            </button>
+            {isWalk ? (
+              <button
+                type="button"
+                className="btn-press h-12 min-w-[5.5rem] touch-none rounded-md border border-line bg-bg/40 px-4 font-mono text-xs tracking-label text-fg uppercase"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  simRef.current?.jump();
+                }}
+              >
+                Jump
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-pressed={thrustHeld === "brake"}
+                className={`btn-press h-12 min-w-[5.5rem] touch-none rounded-md border border-line px-4 font-mono text-xs tracking-label uppercase ${
+                  thrustHeld === "brake" ? "bg-accent text-bg" : "bg-bg/40 text-fg"
+                }`}
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  try {
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                  } catch {
+                    /* ignore */
+                  }
+                  holdThrust("brake", true);
+                }}
+                onPointerUp={() => holdThrust("brake", false)}
+                onPointerCancel={() => holdThrust("brake", false)}
+              >
+                Brake
+              </button>
+            )}
           </div>
         </>
       ) : null}

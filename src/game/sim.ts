@@ -148,6 +148,10 @@ const WALK_MAX_DROP = 0.5;
 const WALK_PROBE_UP = 2.3;
 /** How quickly the body follows the ground. Photogrammetry is lumpy underfoot. */
 const WALK_SETTLE = 14;
+/** Straight up off the ground, m/s — about knee height at the top of the arc. */
+const WALK_JUMP_SPEED = 4.0;
+/** Earth, near enough. A jump that hangs reads as a moon landing. */
+const WALK_GRAVITY = 12.5;
 /** Over the shoulder, close enough that the city stays the subject. */
 const WALK_CHASE_OFFSET = new THREE.Vector3(0.55, 1.75, -3.1);
 const WALK_CHASE_LOOK = new THREE.Vector3(0, 1.35, 8);
@@ -278,6 +282,8 @@ export type SimHandle = {
   setFlying: (v: boolean) => void;
   /** High asset tier only: engine audio on or off, live. */
   setSound: (on: boolean) => void;
+  /** Walk only: jump, for the touch button that has no Space bar. */
+  jump: () => void;
   /** Switch render quality mid-session; applies from the next refinement pass. */
   setQuality: (q: QualityLevel) => void;
   setTouch: (partial: Partial<{ pitch: number; roll: number; yaw: number; throttle: number }>) => void;
@@ -385,6 +391,11 @@ export function createSim(
    * driven off it never lifts.
    */
   let carThrottle = 0;
+  /** Walk only: vertical speed while off the ground, and whether it is. */
+  let walkVy = 0;
+  let airborne = false;
+  /** Set by the touch button; the keyboard has its own edge in `input`. */
+  let touchJump = false;
   let engineAudio: EngineAudio | null = null;
   let audioWanted = soundOn;
   let audioLoading = false;
@@ -661,6 +672,8 @@ export function createSim(
     city = next;
     pose = spawnPose(city, vehicle);
     grounded = false;
+    airborne = false;
+    walkVy = 0;
     arrivalHeight = Number.NaN;
     lastRestY = Number.NaN;
     steerAngle = 0;
@@ -820,6 +833,14 @@ export function createSim(
       return;
     }
 
+    // Read the press every frame, so it never queues up for later.
+    const jumped = input.consumeJump() || touchJump;
+    touchJump = false;
+    if (jumped && !airborne) {
+      walkVy = WALK_JUMP_SPEED;
+      airborne = true;
+    }
+
     const axes = input.sample();
     // A/D arrive on the roll axis (A = -1) and left must increase heading, the
     // same as the car. This negation is the only sign flip in the turn path —
@@ -876,6 +897,20 @@ export function createSim(
       pose.z = prevZ;
       return;
     }
+    if (airborne) {
+      // Ballistic while the feet are off the ground: the surface only matters
+      // again on the way down, and a kerb it clears on the way is not a cliff.
+      pose.y += walkVy * dt;
+      walkVy -= WALK_GRAVITY * dt;
+      lastRestY = restY;
+      if (walkVy <= 0 && pose.y <= restY) {
+        pose.y = restY;
+        walkVy = 0;
+        airborne = false;
+      }
+      return;
+    }
+
     // Compare against the surface underfoot last frame, not the body: measuring
     // the body deadlocks it, exactly as it did for the car.
     const drop = restY - lastRestY;
@@ -1274,7 +1309,7 @@ export function createSim(
     if (vehicle === "walk") {
       // The gait is driven by the ground speed, not by the key held: blocked
       // against a wall the legs stop, which is what the player sees anyway.
-      walker?.update(dt, pose.speed);
+      walker?.update(dt, pose.speed, airborne);
       // Hide the character in first person — from inside its own head all you
       // would see is the back of its face.
       if (walker) walker.group.visible = cameraMode !== "cockpit";
@@ -1358,6 +1393,9 @@ export function createSim(
       // pause card.
       engineAudio?.setMuted(!v);
       emitHud();
+    },
+    jump: () => {
+      touchJump = true;
     },
     setSound: (on) => {
       audioWanted = on;

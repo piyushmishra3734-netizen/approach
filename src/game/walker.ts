@@ -1,7 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
-import { retargetClip } from "three/addons/utils/SkeletonUtils.js";
 
 /*
  * The character you walk the city as.
@@ -33,7 +32,7 @@ const STRIDE_RANGE = { min: 0.55, max: 1.9 };
 /** Seconds to cross from one clip to another. */
 const BLEND = 0.18;
 
-export type Gait = "idle" | "walk" | "run";
+export type Gait = "idle" | "walk" | "run" | "jump";
 
 export type CharacterSpec = {
   /** GLB holding the character. */
@@ -101,7 +100,11 @@ export const ROBOT: CharacterSpec = {
 export const LACRIMOSA: CharacterSpec = {
   model: "models/lacrimosa.glb",
   own: { idle: "stand" },
-  borrow: { walk: "models/anim-walk.fbx", run: "models/anim-run.fbx" },
+  borrow: {
+    walk: "models/anim-walk.fbx",
+    run: "models/anim-run.fbx",
+    jump: "models/anim-jump.fbx",
+  },
   boneMap: BIPED_FROM_MIXAMO,
 };
 
@@ -117,7 +120,7 @@ export type Walker = {
    * Advance the animation. `speed` is ground speed in m/s, signed: walking
    * backwards runs the cycle backwards rather than moonwalking forwards.
    */
-  update: (dt: number, speed: number) => void;
+  update: (dt: number, speed: number, airborne?: boolean) => void;
   dispose: () => void;
 };
 
@@ -178,51 +181,112 @@ async function borrowClip(
   if (!source || !clip) return null;
 
   // Map by prefix: `Bip001-L-Foot_0180` is the same bone as `Bip001-L-Foot`.
-  const names: Record<string, string> = {};
+  // The source names carry no colon: `mixamorig:Hips` is a reserved character
+  // away from a track path, so every loader strips it on the way in.
+  const pairs: Array<{ bone: THREE.Bone; from: THREE.Bone }> = [];
   for (const bone of target.skeleton.bones) {
     for (const [stem, sourceName] of Object.entries(boneMap)) {
-      if (bone.name === stem || bone.name.startsWith(`${stem}_`)) {
-        names[bone.name] = sourceName;
-        break;
-      }
+      if (bone.name !== stem && !bone.name.startsWith(`${stem}_`)) continue;
+      const from = source.skeleton.getBoneByName(sourceName);
+      if (from) pairs.push({ bone, from });
+      break;
     }
   }
-
-  /*
-   *  samples by driving the target skeleton itself, and leaves it
-   * standing in the source's last frame — positions and scales included, at the
-   * source rig's units. The clips it returns are rotation-only, so nothing ever
-   * puts those back, and a mesh skinned to centimetre-scale bones is scattered
-   * far enough to look like it never loaded at all. Borrow the skeleton, then
-   * give it back exactly as it was.
-   */
-  // Both ends have to resolve. A target bone that maps to a source name which
-  // does not exist is skipped silently by the retarget, and enough of those
-  // hands back a clip with no tracks in it that still reports itself as a
-  // working walk — which is exactly how the colon in `mixamorig:Hips` hid.
-  const matched = Object.values(names).filter((n) => source.skeleton.getBoneByName(n)).length;
-  if (matched === 0) {
+  if (pairs.length === 0) {
     console.warn(
-      `[walker] ${name}: none of ${Object.keys(names).length} mapped bones exist in the source rig`,
+      `[walker] ${name}: no bone of this rig matched the source`,
       source.skeleton.bones.slice(0, 3).map((b) => b.name),
     );
     return null;
   }
+  // Parents before children: a bone's local rotation is read against a parent
+  // that must already hold this frame's pose.
+  const depth = (o: THREE.Object3D) => {
+    let n = 0;
+    for (let p = o.parent; p; p = p.parent) n++;
+    return n;
+  };
+  pairs.sort((a, b) => depth(a.bone) - depth(b.bone));
 
+  /*
+   * Retarget against both rigs' rest poses, not by copying orientations across.
+   *
+   * three's own `retargetClip` gives the target bone the source bone's world
+   * orientation outright. That only holds where the two rigs agree on which way
+   * a bone's local axes point, and Mixamo and 3ds Max Biped do not: copied
+   * straight over, the knees bend forwards.
+   *
+   * So take what the source bone has *moved* from its own rest pose, in world
+   * space, and apply that same movement to the target's rest pose. Rest-pose
+   * relative, which is rig-agnostic.
+   */
   const rest = target.skeleton.bones.map((bone) => ({
     bone,
     position: bone.position.clone(),
     quaternion: bone.quaternion.clone(),
     scale: bone.scale.clone(),
   }));
-  const retargeted = retargetClip(target, source, clip, { names });
+  source.updateMatrixWorld(true);
+  target.updateMatrixWorld(true);
+  const restWorld = new Map<THREE.Bone, { from: THREE.Quaternion; to: THREE.Quaternion }>();
+  for (const { bone, from } of pairs) {
+    restWorld.set(bone, {
+      from: from.getWorldQuaternion(new THREE.Quaternion()),
+      to: bone.getWorldQuaternion(new THREE.Quaternion()),
+    });
+  }
+
+  const fps = 30;
+  const frames = Math.max(2, Math.round(clip.duration * fps));
+  const step = clip.duration / (frames - 1);
+  const times = new Float32Array(frames);
+  const values = new Map<THREE.Bone, Float32Array>();
+  for (const { bone } of pairs) values.set(bone, new Float32Array(frames * 4));
+
+  const mixer = new THREE.AnimationMixer(source);
+  mixer.clipAction(clip).play();
+  const delta = new THREE.Quaternion();
+  const want = new THREE.Quaternion();
+  const parent = new THREE.Quaternion();
+  const live = new THREE.Quaternion();
+
+  for (let frame = 0; frame < frames; frame++) {
+    mixer.update(frame === 0 ? 0 : step);
+    source.updateMatrixWorld(true);
+    times[frame] = frame * step;
+
+    for (const { bone, from } of pairs) {
+      const at = restWorld.get(bone)!;
+      // How far this bone has turned from its own rest pose, in world space.
+      delta.copy(from.getWorldQuaternion(live)).multiply(at.from.clone().invert());
+      // The same turn, applied to where this rig rests.
+      want.copy(delta).multiply(at.to);
+      // Back into the parent's frame, which already holds this frame's pose.
+      if (bone.parent) {
+        (bone.parent as THREE.Bone).getWorldQuaternion(parent);
+        want.premultiply(parent.invert());
+      }
+      bone.quaternion.copy(want);
+      bone.updateMatrixWorld(true);
+      want.toArray(values.get(bone)!, frame * 4);
+    }
+  }
+  mixer.stopAllAction();
+  mixer.uncacheRoot(source);
+
+  // The skeleton was the scratch pad; hand it back as it was found.
   for (const held of rest) {
     held.bone.position.copy(held.position);
     held.bone.quaternion.copy(held.quaternion);
     held.bone.scale.copy(held.scale);
   }
-  retargeted.name = name;
-  return retargeted;
+  target.updateMatrixWorld(true);
+
+  const tracks = pairs.map(
+    ({ bone }) =>
+      new THREE.QuaternionKeyframeTrack(`.bones[${bone.name}].quaternion`, times, values.get(bone)!),
+  );
+  return new THREE.AnimationClip(name, clip.duration, tracks);
 }
 
 /**
@@ -270,12 +334,12 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
   const mixer = new THREE.AnimationMixer(skinned ?? source);
 
   const clips: Partial<Record<Gait, THREE.AnimationClip>> = {};
-  for (const gait of ["idle", "walk", "run"] as Gait[]) {
+  for (const gait of ["idle", "walk", "run", "jump"] as Gait[]) {
     const own = findClip(gltf.animations, spec.own?.[gait]);
     if (own) clips[gait] = own;
   }
   if (skinned && spec.borrow && spec.boneMap) {
-    for (const gait of ["idle", "walk", "run"] as Gait[]) {
+    for (const gait of ["idle", "walk", "run", "jump"] as Gait[]) {
       const url = spec.borrow[gait];
       if (!url) continue;
       const borrowed = await borrowClip(base + url, skinned, spec.boneMap, gait);
@@ -293,12 +357,22 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
   const idle = action(clips.idle);
   const walk = action(clips.walk);
   const run = action(clips.run);
+  const jump = action(clips.jump);
+  if (jump) {
+    // A jump happens once and holds its last frame until the feet are back.
+    jump.setLoop(THREE.LoopOnce, 1);
+    jump.clampWhenFinished = true;
+  }
   if (idle) idle.setEffectiveWeight(1);
 
   /** Current blend weights, eased toward the target so gait changes glide. */
-  const weight = { idle: 1, walk: 0, run: 0 };
+  const weight = { idle: 1, walk: 0, run: 0, jump: 0 };
+  let wasAirborne = false;
 
-  function update(dt: number, speed: number) {
+  function update(dt: number, speed: number, airborne = false) {
+    // Restart the clip on the way up, not on every frame off the ground.
+    if (airborne && !wasAirborne && jump) jump.reset().play();
+    wasAirborne = airborne;
     const pace = Math.abs(speed);
     // Targets: still, walking, running, with a band where the two gaits share.
     let wantWalk = 0;
@@ -314,9 +388,13 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
     weight.walk += (wantWalk - weight.walk) * ease;
     weight.run += (wantRun - weight.run) * ease;
 
-    idle?.setEffectiveWeight(weight.idle);
-    walk?.setEffectiveWeight(weight.walk);
-    run?.setEffectiveWeight(weight.run);
+    // In the air the jump takes over from whatever the legs were doing.
+    weight.jump += ((airborne ? 1 : 0) - weight.jump) * (1 - Math.exp(-dt / (BLEND * 0.6)));
+    const grounded = 1 - weight.jump;
+    idle?.setEffectiveWeight(weight.idle * grounded);
+    walk?.setEffectiveWeight(weight.walk * grounded);
+    run?.setEffectiveWeight(weight.run * grounded);
+    jump?.setEffectiveWeight(weight.jump);
 
     // Stretch each cycle to the ground it is covering, and run it backwards
     // when the character is backing up.
