@@ -1196,6 +1196,10 @@ export function createSim(
     tiles.errorTarget = next.errorTarget;
     tiles.lruCache.maxBytesSize = next.maxCache;
     tiles.lruCache.minBytesSize = next.minCache;
+    // UpdateOnChangePlugin skips every pass until the camera moves, which left
+    // a switch made in the menu doing nothing at all. The needs-update event is
+    // its documented override: the very next frame re-refines the whole view.
+    tiles.dispatchEvent({ type: "needs-update" });
     emitHud();
   }
 
