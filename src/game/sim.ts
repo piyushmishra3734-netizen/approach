@@ -123,6 +123,26 @@ const COCKPIT_LOOK = new THREE.Vector3(0, 0.35, 40);
 const CHASE_BANK = 0.12;
 
 /**
+ * How far the world is streamed and drawn, in metres, per vehicle.
+ *
+ * This is the streaming budget, not just a view setting. The tile renderer
+ * only refines what is inside the camera frustum, so the far plane is what
+ * decides how much city gets downloaded: at 48 km it traversed the whole
+ * metropolis at coarse detail before the street under the spawn was sharp.
+ * A short far plane keeps the requests to a bubble around the player.
+ *
+ * The car sees less than the plane because it never leaves the street and
+ * moves at a third of the speed — 2.4 km of visible city is a long way down
+ * a boulevard.
+ */
+const VIEW_DISTANCE: Record<Vehicle, number> = { plane: 7000, car: 3000 };
+/** Haze closes the view before the streamed bubble ends, so nothing pops in. */
+const FOG_NEAR = 0.2;
+const FOG_FAR = 0.8;
+/** Sky sits outside the fog and inside the far plane. */
+const SKY_RADIUS = 0.9;
+
+/**
  * Tiles that have to be drawn before the world is worth starting in.
  *
  * The frame loop runs from the moment the sim is built, with the camera
@@ -229,8 +249,8 @@ function spawnPose(city: City, vehicle: Vehicle = "plane"): Pose {
   return { ...base, y: city.height, pitch: city.el, speed: 48, throttle: 0.42 };
 }
 
-function createSky() {
-  const geo = new THREE.SphereGeometry(12000, 32, 16);
+function createSky(radius: number) {
+  const geo = new THREE.SphereGeometry(radius, 32, 16);
   const mat = new THREE.MeshBasicMaterial({
     color: 0x8eb4d2,
     side: THREE.BackSide,
@@ -287,11 +307,13 @@ export function createSim(
   renderer.domElement.style.touchAction = "none";
   container.appendChild(renderer.domElement);
 
+  const view = VIEW_DISTANCE[vehicle];
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x8eb4d2);
-  scene.fog = new THREE.Fog(0x9cb6c8, 2500, 28000);
+  scene.fog = new THREE.Fog(0x9cb6c8, view * FOG_NEAR, view * FOG_FAR);
 
-  const camera = new THREE.PerspectiveCamera(68, 1, 1, 48000);
+  const camera = new THREE.PerspectiveCamera(68, 1, 1, view);
   scene.add(camera);
 
   scene.add(new THREE.HemisphereLight(0xe8f0f6, 0x5a584e, 1.15));
@@ -302,7 +324,7 @@ export function createSim(
   fill.position.set(2, 1.4, -1.5);
   scene.add(fill);
 
-  const sky = createSky();
+  const sky = createSky(view * SKY_RADIUS);
   scene.add(sky.mesh);
 
   const craft = createCraft();
@@ -837,6 +859,10 @@ export function createSim(
       tris: renderer.info.render.triangles,
       visible: tiles.visibleTiles.size,
       ready: tilesReady,
+      worldReady,
+      warmupClock,
+      tilesDrained,
+      tilesError,
     };
   };
 
