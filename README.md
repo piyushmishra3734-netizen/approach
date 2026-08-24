@@ -1,12 +1,12 @@
-# Approach
+﻿# Approach
 
 Fly or drive through real cities, on Google's Photorealistic 3D Tiles. Take a
-plane over the skyline, or put a Lamborghini on the actual street surface in San
+plane over the skyline, or put a Pagani Huayra Codalunga on the actual street surface in San
 Francisco, New York, London or Tokyo.
 
 **Play: https://piyushmishra3734-netizen.github.io/approach/**
 
-The car model is 18 MB, so it is never fetched behind your back: the start
+The car model is 22 MB, so it is never fetched behind your back: the start
 screen offers it as a download with a progress bar, and Drive only unlocks once
 it is in.
 
@@ -19,9 +19,9 @@ Tailwind v4) for the shell. No install, no account, nothing to save.
 |---|---|---|
 | `W` / `S` | pitch | throttle / brake |
 | `A` / `D` | roll | steer |
-| `Q` / `E` | yaw | — |
-| `Shift` / `Ctrl` | throttle / brake | — |
-| `V` | chase ↔ cockpit | chase ↔ driver's seat |
+| `Q` / `E` | yaw | â€” |
+| `Shift` / `Ctrl` | throttle / brake | â€” |
+| `V` | chase â†” cockpit | chase â†” driver's seat |
 | `R` | restart | restart |
 | `Esc` | pause | pause |
 
@@ -49,7 +49,7 @@ npm run build:pages  # static output for GitHub Pages (needs PAGES_BASE)
 | Path | |
 |---|---|
 | `src/game/sim.ts` | flight and car models, cameras, tile streaming, ground probes |
-| `src/game/car.ts` | loads the Lamborghini and normalises it into the sim frame |
+| `src/game/car.ts` | loads the Pagani and normalises it into the sim frame |
 | `src/game/craft.ts` | the aircraft mesh and its procedural livery |
 | `src/game/input.ts` | keyboard, gamepad and touch axes |
 | `src/game/cities.ts` | the four cities, their flight and drive spawns, the ion asset |
@@ -66,11 +66,11 @@ HUD says the tiles are unavailable. Swap in a token from a free
 
 There is no road data and no physics engine. Four rays are cast down from the
 wheel positions onto the Google tile mesh every frame, and the body is fitted to
-those four contacts with suspension smoothing — the same model Cannon's
+those four contacts with suspension smoothing â€” the same model Cannon's
 `RaycastVehicle` uses, minus the collision bodies a streaming tileset cannot
 provide. Two limits keep it on drivable surfaces without knowing where roads
 are: it will not climb a gradient steeper than a very steep street, and it will
 not follow a sheer drop. Measured wheel-to-surface error is 0.02 m or better in
 all four cities.
 
-Imagery © Google. Tiles served through Cesium ion.
+Imagery Â© Google. Tiles served through Cesium ion.

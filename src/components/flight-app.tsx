@@ -844,7 +844,7 @@ export function FlightApp() {
                       ? "Download failed — check the connection and try again"
                       : `${mb(carBytes.received)} / ${
                           carBytes.total ? mb(carBytes.total) : CAR_DOWNLOAD_MB
-                        } MB · the Lamborghini and its textures`}
+                        } MB · the Pagani and its textures`}
                   </p>
                 </div>
               ) : null}

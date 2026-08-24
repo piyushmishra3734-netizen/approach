@@ -1,4 +1,4 @@
-# Approach — flight game
+﻿# Approach â€” flight game
 
 Three.js flight sim over Google Photorealistic 3D Tiles (San Francisco / New
 York), in a TanStack Start (React 19 + Vite + Tailwind v4) app. The app is named
@@ -6,19 +6,19 @@ York), in a TanStack Start (React 19 + Vite + Tailwind v4) app. The app is named
 
 Game code is small and lives in a handful of files:
 
-- `src/game/sim.ts` — flight physics + world update loop
-- `src/game/craft.ts` — aircraft mesh, livery, procedural materials
-- `src/game/audio.ts` — engine sound (High asset tier only; see below)
-- `src/game/walker.ts` — the on-foot character: model, scale, gait animation
-- `src/game/input.ts` — keyboard/pointer/touch mapping
-- `src/game/cities.ts` — world/city placement data
-- `src/components/flight-app.tsx` — canvas host, HUD, React shell
-- `src/routes/index.tsx` — mounts `<FlightApp />`
+- `src/game/sim.ts` â€” flight physics + world update loop
+- `src/game/craft.ts` â€” aircraft mesh, livery, procedural materials
+- `src/game/audio.ts` â€” engine sound (High asset tier only; see below)
+- `src/game/walker.ts` â€” the on-foot character: model, scale, gait animation
+- `src/game/input.ts` â€” keyboard/pointer/touch mapping
+- `src/game/cities.ts` â€” world/city placement data
+- `src/components/flight-app.tsx` â€” canvas host, HUD, React shell
+- `src/routes/index.tsx` â€” mounts `<FlightApp />`
 
 ## Commands (Windows, Node 24)
 
 ```
-npm run dev        # http://localhost:8080  (never run `vite` directly — npm scripts inject .grok/app-env.json)
+npm run dev        # http://localhost:8080  (never run `vite` directly â€” npm scripts inject .grok/app-env.json)
 npm run typecheck
 npm run lint
 npm test           # node --test on scripts/**
@@ -30,12 +30,12 @@ npm run build      # vite build + db:migrate
 It was scaffolded in Grok's cloud sandbox and exported. That means:
 
 - **`AGENTS.md` is the platform's original contract and is now partly false.**
-  Ignore its sandbox framing — there is no `/workspace`, no Linux container, no
+  Ignore its sandbox framing â€” there is no `/workspace`, no Linux container, no
   preview proxy, no `imagine_*` tools, no injected `XAI_API_KEY`, and the user
   *can* see this terminal. Its app-level rules (scaffold contracts, auth/db
   opt-in, deploy notes) are still accurate.
 - `startup.sh` was the sandbox revive hook. Dead here; `npm run dev` is enough.
-- `.grok/app-env.json` is **live** — `scripts/with-app-env.mjs` reads it for
+- `.grok/app-env.json` is **live** â€” `scripts/with-app-env.mjs` reads it for
   `VITE_AUTH_ENABLED`. Don't delete it.
 
 ### Don't touch (platform wiring, breaks the build or the deploy)
@@ -51,15 +51,15 @@ Auth and Postgres are pre-wired but **off** (`VITE_AUTH_ENABLED: false`, no
 
 Settings in the menu offer **Low** (default) and **High**. Low is the game as
 it shipped: nothing beyond the city tiles, and silent. High downloads
-`public/audio/*.mp3` (~110 KB) and turns on engine audio — sampled loops for
+`public/audio/*.mp3` (~110 KB) and turns on engine audio â€” sampled loops for
 the car, synthesis for the plane. Anything added later that costs bandwidth
 belongs in High, not in the default path.
 
 Sample provenance and licence are in `public/audio/CREDITS.md`. The car model
-(`public/models/lamborghini.glb`, ~18 MB) stays a separate explicit download
-on its own button — it is not part of the tier.
+(`public/models/pagani.glb`, ~22 MB) stays a separate explicit download
+on its own button â€” it is not part of the tier.
 
-The walking character (`public/models/robot.glb`, ~0.5 MB, CC0 — see
+The walking character (`public/models/robot.glb`, ~0.5 MB, CC0 â€” see
 `public/models/CREDITS.md`) is small enough to fetch the moment someone picks
 Walk, so it has neither a button nor a tier.
 
@@ -72,10 +72,10 @@ a free cesium.com/ion account when it lapses.
 
 ## Skills
 
-`.claude/skills/` — `building-games`, `controls`, `design-ui`, `threejs`,
+`.claude/skills/` â€” `building-games`, `controls`, `design-ui`, `threejs`,
 `multiplayer-p2p`. Read `controls` before touching steering/roll/yaw; inverted
 A/D is this codebase's stated top failure mode.
 
 `.grok/skills/` holds the leftovers (`imagine`, `generate2d*`, `xai-api`,
-`auth`, `neon`, `og`) — they need Grok-only tools or platform config, kept as
+`auth`, `neon`, `og`) â€” they need Grok-only tools or platform config, kept as
 reference only.

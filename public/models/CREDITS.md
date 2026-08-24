@@ -1,5 +1,16 @@
 # Model credits
 
+## Car — `pagani.glb`
+
+Used by the Drive mode.
+
+- Source: [Vecarz](https://www.vecarz.com/) — Pagani Huayra Codalunga, fetched
+  from their free models section (`pagani_huayra_codalunga__www.vecarz.com`).
+- Converted to glTF as shipped; wheel hubs, orientation and scale are measured
+  at load time in `src/game/car.ts` (`PAGANI_RIG`).
+- Licence: Vecarz free-model terms — personal/non-commercial use. Replace with
+  a self-made or licensed model before any commercial release.
+
 ## Character — `robot.glb`
 
 Used by the Walk mode.
