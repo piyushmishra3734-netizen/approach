@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Maximize, Menu, Minimize, RotateCw, Settings } from "lucide-react";
 import { CITIES, CITY_ORDER, type CityId } from "@/game/cities";
-import type { HudSnapshot, SimHandle, Vehicle } from "@/game/sim";
+import type { HudSnapshot, QualityLevel, SimHandle, Vehicle } from "@/game/sim";
 
 const EMPTY_HUD: HudSnapshot = {
   ready: false,
@@ -22,6 +22,7 @@ const EMPTY_HUD: HudSnapshot = {
   onRoad: true,
   worldReady: false,
   warmup: 0,
+  quality: "medium",
   error: null,
 };
 
@@ -33,6 +34,7 @@ const STICK_DEADZONE = 0.14;
 const CITY_KEY = "approach.city";
 const VEHICLE_KEY = "approach.vehicle";
 const ASSETS_KEY = "approach.assets";
+const QUALITY_KEY = "approach.quality";
 
 /**
  * How much the game is allowed to download beyond the city tiles.
@@ -139,6 +141,16 @@ function readStoredVehicle(): Vehicle {
   return "plane";
 }
 
+function readStoredQuality(): QualityLevel {
+  try {
+    const v = localStorage.getItem(QUALITY_KEY);
+    if (v === "low" || v === "medium" || v === "high") return v;
+  } catch {
+    /* private mode */
+  }
+  return "medium";
+}
+
 function loadLabel(simReady: boolean, hud: HudSnapshot, progress: number, bootError: boolean) {
   if (bootError) return "Unavailable";
   if (!simReady) return "Loading engine";
@@ -158,6 +170,7 @@ export function FlightApp() {
   const cityRef = useRef<CityId>("sf");
   const vehicleRef = useRef<Vehicle>("plane");
   const assetsRef = useRef<AssetTier>("low");
+  const qualityRef = useRef<QualityLevel>("medium");
   const pendingStart = useRef(false);
   /** Latest `hud.worldReady`, so the start gate does not re-bind the key handler. */
   const worldReadyRef = useRef(false);
@@ -182,11 +195,13 @@ export function FlightApp() {
   const [carState, setCarState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
   const [carBytes, setCarBytes] = useState({ received: 0, total: 0 });
   const [assets, setAssets] = useState<AssetTier>("low");
+  const [quality, setQuality] = useState<QualityLevel>("medium");
   const [packState, setPackState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
   const [packBytes, setPackBytes] = useState({ received: 0, total: 0 });
   cityRef.current = cityId;
   vehicleRef.current = vehicle;
   assetsRef.current = assets;
+  qualityRef.current = quality;
   worldReadyRef.current = hud.worldReady;
 
   useEffect(() => {
@@ -196,6 +211,8 @@ export function FlightApp() {
     if (storedVehicle !== vehicleRef.current) setVehicle(storedVehicle);
     const storedAssets = readStoredAssets();
     if (storedAssets !== assetsRef.current) setAssets(storedAssets);
+    const storedQuality = readStoredQuality();
+    if (storedQuality !== qualityRef.current) setQuality(storedQuality);
   }, []);
 
   useEffect(() => {
@@ -203,10 +220,11 @@ export function FlightApp() {
       localStorage.setItem(CITY_KEY, cityId);
       localStorage.setItem(VEHICLE_KEY, vehicle);
       localStorage.setItem(ASSETS_KEY, assets);
+      localStorage.setItem(QUALITY_KEY, quality);
     } catch {
       /* private mode */
     }
-  }, [cityId, vehicle, assets]);
+  }, [cityId, vehicle, assets, quality]);
 
   useEffect(() => {
     // Tidy the address bar after a pull-to-reload.
@@ -319,6 +337,7 @@ export function FlightApp() {
             cityRef.current,
             vehicleRef.current,
             assetsRef.current === "high",
+            qualityRef.current,
           );
         } catch {
           setBootError(true);
@@ -418,6 +437,13 @@ export function FlightApp() {
       )
       .then(() => setCarState("ready"))
       .catch(() => setCarState("failed"));
+  }, []);
+
+  /** Switch render quality; applies to the running sim immediately. */
+  const chooseQuality = useCallback((next: QualityLevel) => {
+    setQuality(next);
+    qualityRef.current = next;
+    simRef.current?.setQuality(next);
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -884,6 +910,40 @@ export function FlightApp() {
                 hidden={!settingsOpen}
                 className="flex flex-col gap-2 border-l border-line pl-4"
               >
+                <div className="flex items-center gap-4">
+                  <span className="font-mono text-xs tracking-label text-muted uppercase">
+                    Quality
+                  </span>
+                  <div
+                    className="flex gap-1 rounded-md border border-line p-1"
+                    role="group"
+                    aria-label="Render quality"
+                  >
+                    {(["low", "medium", "high"] as QualityLevel[]).map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => chooseQuality(level)}
+                        aria-pressed={quality === level}
+                        className={`btn-press h-8 rounded px-4 font-mono text-xs tracking-hud uppercase ${
+                          quality === level ? "bg-accent text-bg" : "text-dim hover:text-fg"
+                        }`}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p
+                  className="max-w-sm font-mono text-xs leading-relaxed tracking-hud text-dim"
+                  aria-live="polite"
+                >
+                  {quality === "low"
+                    ? "Low · fastest — softer buildings, for weaker machines."
+                    : quality === "high"
+                      ? "High · sharpest structures, needs a strong GPU and headroom."
+                      : "Medium · crisp buildings that still run light."}
+                </p>
                 <div className="flex items-center gap-4">
                   <span className="font-mono text-xs tracking-label text-muted uppercase">
                     Assets

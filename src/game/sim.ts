@@ -86,7 +86,7 @@ const CAR_MAX_DROP = 1.2;
  * The car probes from just over its own roof, not from the plane's 300 m up.
  * The probe takes the first surface it meets going down, so a high origin
  * finds the roof of whatever tower the car is standing next to and parks the
- * Lamborghini on it.
+ * Pagani on it.
  */
 const CAR_PROBE_UP = 2.4;
 /** Refined tiles the area needs before the car is allowed to land on it. */
@@ -116,7 +116,7 @@ const CAR_BODY_SMOOTH = 9;
 const CAR_TILT_SMOOTH = 5.5;
 /*
  * Car chase cam. Sat 7.4 m back, which put three car lengths of empty road
- * between the player and the Lamborghini and made it read as something being
+ * between the player and the Pagani and made it read as something being
  * watched rather than driven. Pulled in to just over a car length behind the
  * rear bumper, and a shade lower, so the body fills the frame and the kerb
  * still shows.
@@ -176,9 +176,14 @@ const CHASE_BANK = 0.12;
  * a boulevard.
  */
 const VIEW_DISTANCE: Record<Vehicle, number> = { plane: 7000, car: 3000, walk: 1600 };
-/** Haze closes the view before the streamed bubble ends, so nothing pops in. */
-const FOG_NEAR = 0.2;
-const FOG_FAR = 0.8;
+/**
+ * Haze closes the view before the streamed bubble ends, so nothing pops in.
+ *
+ * Pushed back from 0.2/0.8 so the mid-distance skyline reads crisp instead of
+ * swimming in haze — the bubble edge itself stays hidden behind the last 10%.
+ */
+const FOG_NEAR = 0.3;
+const FOG_FAR = 0.9;
 /** Sky sits outside the fog and inside the far plane. */
 const SKY_RADIUS = 0.9;
 
@@ -203,6 +208,22 @@ const WARMUP_TIMEOUT = 12;
 export type CameraMode = "chase" | "cockpit";
 export type Vehicle = "plane" | "car" | "walk";
 
+/**
+ * Render quality, exposed in the settings panel.
+ *
+ * errorTarget is pixels of allowed screen-space error — lower is sharper and
+ * heavier; the cache sizes grow with it so the extra detail stays streamed
+ * rather than re-fetching on every look-back. Medium is the tuned default:
+ * noticeably crisper than the original 10 without drowning an 8 GB laptop.
+ */
+export type QualityLevel = "low" | "medium" | "high";
+
+const QUALITY: Record<QualityLevel, { errorTarget: number; maxCache: number; minCache: number }> = {
+  low: { errorTarget: 10, maxCache: 256 * 1024 * 1024, minCache: 128 * 1024 * 1024 },
+  medium: { errorTarget: 6, maxCache: 512 * 1024 * 1024, minCache: 256 * 1024 * 1024 },
+  high: { errorTarget: 4, maxCache: 768 * 1024 * 1024, minCache: 320 * 1024 * 1024 },
+};
+
 export type HudSnapshot = {
   ready: boolean;
   progress: number;
@@ -226,6 +247,8 @@ export type HudSnapshot = {
   worldReady: boolean;
   /** Progress toward `worldReady`, 0..1, for the menu's load rail. */
   warmup: number;
+  /** Current render quality tier, mirrored in the settings panel. */
+  quality: QualityLevel;
   error: string | null;
 };
 
@@ -238,6 +261,8 @@ export type SimHandle = {
   setFlying: (v: boolean) => void;
   /** High asset tier only: engine audio on or off, live. */
   setSound: (on: boolean) => void;
+  /** Switch render quality mid-session; applies from the next refinement pass. */
+  setQuality: (q: QualityLevel) => void;
   setTouch: (partial: Partial<{ pitch: number; roll: number; yaw: number; throttle: number }>) => void;
 };
 
@@ -322,6 +347,7 @@ export function createSim(
   initialCity: CityId = "sf",
   vehicle: Vehicle = "plane",
   soundOn = false,
+  quality: QualityLevel = "medium",
 ): SimHandle {
   let city = CITIES[initialCity] ?? CITIES.sf;
   let pose = spawnPose(city, vehicle);
@@ -345,6 +371,8 @@ export function createSim(
   let engineAudio: EngineAudio | null = null;
   let audioWanted = soundOn;
   let audioLoading = false;
+  /** Live render quality; the tile settings below chase it. */
+  let qualityLevel = QUALITY[quality] ? quality : "medium";
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -352,6 +380,10 @@ export function createSim(
     alpha: false,
     preserveDrawingBuffer: true,
   });
+  // Cap held at 1.75: past this the fill-rate cost climbs faster than the
+  // visible sharpness does, and ordinary GPUs start dropping frames.
+  // `setResolutionFromRenderer` feeds the same size to tile refinement either
+  // way, so errorTarget does most of the quality work.
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
@@ -451,9 +483,14 @@ export function createSim(
   tiles.registerPlugin(new UpdateOnChangePlugin());
   tiles.registerPlugin(reorient);
   tiles.setCamera(camera);
-  tiles.errorTarget = 10;
-  tiles.lruCache.maxBytesSize = 420 * 1024 * 1024;
-  tiles.lruCache.minBytesSize = 180 * 1024 * 1024;
+  /**
+   * Screen-space error the tile refinement chases, in pixels — lower is
+   * sharper and heavier. The tier is user-selectable in the settings panel
+   * and lands through `applyQuality` below; these are just the boot values.
+   */
+  tiles.errorTarget = QUALITY[qualityLevel].errorTarget;
+  tiles.lruCache.maxBytesSize = QUALITY[qualityLevel].maxCache;
+  tiles.lruCache.minBytesSize = QUALITY[qualityLevel].minCache;
   scene.add(tiles.group);
 
   let tilesReady = false;
@@ -506,6 +543,8 @@ export function createSim(
   const followEuler = new THREE.Euler(0, 0, 0, "YXZ");
   const followQuat = new THREE.Quaternion();
   let camInitialized = false;
+  /** Smoothed frames-per-second, for the debug probe and QA runs. */
+  let fps = 0;
 
   /** The object the camera follows: the car once it is loaded, else the plane. */
   /** The lat/lon the tileset is centred on, which differs per vehicle. */
@@ -1002,6 +1041,7 @@ export function createSim(
       onRoad: vehicle === "plane" || grounded,
       worldReady,
       warmup: worldReady ? 1 : clamp(tiles.visibleTiles.size / WARMUP_TILES, 0, 1),
+      quality: qualityLevel,
       error: tilesError,
     });
   }
@@ -1038,7 +1078,33 @@ export function createSim(
       craft: body().position.toArray(),
       vehicle,
       flying,
-      character: walker ? { height: +walker.height.toFixed(2), gaits: walker.gaits } : null,
+      character: walker
+        ? (() => {
+            const b = new THREE.Box3().setFromObject(walker.group);
+            let meshes = 0;
+            let visible = 0;
+            let material = "none";
+            walker.group.traverse((o) => {
+              const m = o as THREE.Mesh;
+              if (!m.isMesh) return;
+              meshes++;
+              if (m.visible) visible++;
+              const mat = m.material as THREE.Material;
+              if (material === "none" && mat) material = mat.type + (mat.transparent ? " transparent" : "");
+            });
+            return {
+              height: +walker.height.toFixed(2),
+              gaits: walker.gaits,
+              meshes,
+              visible,
+              material,
+              groupVisible: walker.group.visible,
+              box: b.isEmpty()
+                ? "empty"
+                : [b.min.toArray().map((n) => +n.toFixed(1)), b.max.toArray().map((n) => +n.toFixed(1))],
+            };
+          })()
+        : null,
       steer: steerAngle,
       wheelRadius: car?.wheelRadius ?? null,
       speed: pose.speed,
@@ -1069,6 +1135,8 @@ export function createSim(
       vel: [Math.sin(pose.heading), Math.sin(pose.pitch), Math.cos(pose.heading)],
       calls: renderer.info.render.calls,
       tris: renderer.info.render.triangles,
+      fps: Math.round(fps),
+      errorTarget: tiles.errorTarget,
       visible: tiles.visibleTiles.size,
       ready: tilesReady,
       worldReady,
@@ -1080,6 +1148,21 @@ export function createSim(
       tilesError,
     };
   };
+
+  /**
+   * Apply a quality tier live. The cache resize is safe either direction —
+   * the LRU evicts down to the new ceiling — and the refinement pass picks up
+   * the new errorTarget the next time the view changes.
+   */
+  function applyQuality(q: QualityLevel) {
+    const next = QUALITY[q];
+    if (!next || q === qualityLevel) return;
+    qualityLevel = q;
+    tiles.errorTarget = next.errorTarget;
+    tiles.lruCache.maxBytesSize = next.maxCache;
+    tiles.lruCache.minBytesSize = next.minCache;
+    emitHud();
+  }
 
   /**
    * Build the engine audio, once, from inside a user gesture.
@@ -1136,6 +1219,7 @@ export function createSim(
     if (disposed) return;
     timer.update();
     const dt = Math.min(timer.getDelta(), 0.08);
+    if (dt > 0) fps += (1 / dt - fps) * 0.05;
 
     if (input.consumeViewToggle() && flying) {
       cameraMode = cameraMode === "chase" ? "cockpit" : "chase";
@@ -1246,6 +1330,7 @@ export function createSim(
         engineAudio = null;
       }
     },
+    setQuality: applyQuality,
     setTouch: (partial) => {
       if (partial.pitch != null) input.touch.pitch = partial.pitch;
       if (partial.roll != null) input.touch.roll = partial.roll;
