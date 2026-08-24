@@ -20,6 +20,8 @@ const EMPTY_HUD: HudSnapshot = {
   speedKph: 0,
   blocked: false,
   onRoad: true,
+  worldReady: false,
+  warmup: 0,
   error: null,
 };
 
@@ -79,6 +81,7 @@ function loadLabel(simReady: boolean, hud: HudSnapshot, progress: number, bootEr
   if (!simReady) return "Loading engine";
   if (hud.error && !hud.ready) return "Tiles unavailable";
   if (!hud.ready) return "Streaming city";
+  if (!hud.worldReady) return `Building the city · ${Math.round(hud.warmup * 100)}%`;
   if (progress < 100) return `${progress}%`;
   return "Ready";
 }
@@ -92,6 +95,8 @@ export function FlightApp() {
   const cityRef = useRef<CityId>("sf");
   const vehicleRef = useRef<Vehicle>("plane");
   const pendingStart = useRef(false);
+  /** Latest `hud.worldReady`, so the start gate does not re-bind the key handler. */
+  const worldReadyRef = useRef(false);
   const resumeBtnRef = useRef<HTMLButtonElement>(null);
   const flyBtnRef = useRef<HTMLButtonElement>(null);
   const [hud, setHud] = useState<HudSnapshot>(EMPTY_HUD);
@@ -111,6 +116,7 @@ export function FlightApp() {
   const [carBytes, setCarBytes] = useState({ received: 0, total: 0 });
   cityRef.current = cityId;
   vehicleRef.current = vehicle;
+  worldReadyRef.current = hud.worldReady;
 
   useEffect(() => {
     const storedCity = readStoredCity();
@@ -158,14 +164,8 @@ export function FlightApp() {
         }
         simRef.current = handle;
         setSimReady(true);
-        if (pendingStart.current) {
-          handle.setCity(cityRef.current);
-          handle.start();
-          pendingStart.current = false;
-          setMenu(false);
-          setPaused(false);
-          setHintVisible(true);
-        }
+        // A start that was waiting on this rebuild is not fired here: the new
+        // sim has no city drawn yet. The warm-up effect below releases it.
       })
       .catch(() => {
         if (!cancelled) setBootError(true);
@@ -176,6 +176,9 @@ export function FlightApp() {
       handle?.dispose();
       simRef.current = null;
       setSimReady(false);
+      // The old sim's last snapshot said the world was ready; the new one's
+      // is not, and a stale `worldReady` would wave the player straight in.
+      setHud(EMPTY_HUD);
     };
     // The vehicle is baked into the sim (which model, which dynamics), so
     // switching it rebuilds — only ever from the menu, never mid-drive.
@@ -245,10 +248,14 @@ export function FlightApp() {
 
   const begin = useCallback(() => {
     if (bootError) return;
-    if (!simRef.current) {
+    // The sim streams the spawn view under the menu. Starting before any of it
+    // has drawn drops the player into blank sky, so an early press is held and
+    // the effect below fires it the moment the city is there.
+    if (!simRef.current || !worldReadyRef.current) {
       pendingStart.current = true;
       return;
     }
+    pendingStart.current = false;
     simRef.current.setCity(cityRef.current);
     simRef.current.start();
     setMenu(false);
@@ -274,6 +281,11 @@ export function FlightApp() {
     },
     [bootError, begin],
   );
+
+  /** Release a start that was pressed before the city had drawn. */
+  useEffect(() => {
+    if (pendingStart.current && hud.worldReady) begin();
+  }, [hud.worldReady, begin]);
 
   const restart = useCallback(() => {
     setPaused(false);
@@ -421,9 +433,16 @@ export function FlightApp() {
   const rawProgress = hud.progress;
   const progressPct = Math.round(rawProgress > 1 ? rawProgress : rawProgress * 100);
   const progress = Math.min(100, Math.max(0, progressPct));
+  // Before the start the rail tracks the warm-up — how much of the spawn view
+  // has actually drawn. `loadProgress` is no use there: it reads 100% while the
+  // queue is still empty, so the old rail sat full over an empty sky.
+  const railPct = hud.worldReady ? progress : Math.round(hud.warmup * 100);
+  const canStart = simReady && hud.worldReady && !bootError;
   const flying = hud.flying && !paused && !menu;
-  const streaming = !bootError && (!simReady || !hud.ready || progress < 100);
-  const waitRail = streaming && progress <= 2 && !hud.ready;
+  const streaming = !bootError && (!simReady || !hud.worldReady || progress < 100);
+  // Indeterminate shimmer while there is nothing true to report yet: no root
+  // tileset, or a warm-up that has not drawn its first tile.
+  const waitRail = streaming && railPct <= 2 && (!hud.ready || !hud.worldReady);
   const status = loadLabel(simReady, hud, progress, bootError);
   const findingRoad = flying && isCar && !hud.onRoad && !hud.error && !bootError;
   const showStreamChip = flying && (!hud.ready || findingRoad) && !hud.error;
@@ -446,13 +465,13 @@ export function FlightApp() {
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={waitRail ? undefined : progress}
+        aria-valuenow={waitRail ? undefined : railPct}
         aria-label="City tile load"
         aria-hidden={!streaming}
       >
         <div
           className="load-rail-fill"
-          style={waitRail ? undefined : { transform: `scaleX(${progress / 100})` }}
+          style={waitRail ? undefined : { transform: `scaleX(${railPct / 100})` }}
         />
       </div>
 
@@ -501,19 +520,30 @@ export function FlightApp() {
                   ref={flyBtnRef}
                   type="button"
                   onClick={() => startWith("plane")}
-                  disabled={!simReady || bootError}
+                  disabled={!canStart}
                   className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
                     vehicle === "plane"
                       ? "bg-accent text-bg hover:opacity-90"
                       : "border border-line text-fg hover:border-fg/40"
                   }`}
                 >
-                  {bootError ? "Unavailable" : !simReady ? "Preparing" : "Fly"}
+                  {bootError
+                    ? "Unavailable"
+                    : !simReady
+                      ? "Preparing"
+                      : !hud.worldReady
+                        ? "Loading"
+                        : "Fly"}
                 </button>
                 <button
                   type="button"
                   onClick={carState === "ready" ? () => startWith("car") : getCar}
-                  disabled={!simReady || bootError || carState === "downloading"}
+                  disabled={
+                    !simReady ||
+                    bootError ||
+                    carState === "downloading" ||
+                    (carState === "ready" && !hud.worldReady)
+                  }
                   className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
                     vehicle === "car" && carState === "ready"
                       ? "bg-accent text-bg hover:opacity-90"
@@ -525,7 +555,9 @@ export function FlightApp() {
                     : !simReady
                       ? "Preparing"
                       : carState === "ready"
-                        ? "Drive"
+                        ? hud.worldReady
+                          ? "Drive"
+                          : "Loading"
                         : carState === "downloading"
                           ? `${carPercent}%`
                           : carState === "failed"

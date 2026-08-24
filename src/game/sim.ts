@@ -122,6 +122,24 @@ const COCKPIT_LOOK = new THREE.Vector3(0, 0.35, 40);
 /** Chase cam takes a sliver of bank so the plane, not the world, does the rolling. */
 const CHASE_BANK = 0.12;
 
+/**
+ * Tiles that have to be drawn before the world is worth starting in.
+ *
+ * The frame loop runs from the moment the sim is built, with the camera
+ * already parked at the spawn, so the city streams in under the menu while the
+ * player is still reading it. Without a gate the Fly button was live before any
+ * of that had arrived and the first few seconds of every game were empty blue
+ * sky — the load rail read 100% throughout, because `loadProgress` reports a
+ * drained queue as finished whether or not anything was ever queued.
+ */
+const WARMUP_TILES = 12;
+/**
+ * ...and the gate opens after this long regardless. On a throttled connection,
+ * or with the tileset down entirely, flying an empty sky beats staring at a
+ * disabled button.
+ */
+const WARMUP_TIMEOUT = 12;
+
 export type CameraMode = "chase" | "cockpit";
 export type Vehicle = "plane" | "car";
 
@@ -144,6 +162,10 @@ export type HudSnapshot = {
   blocked: boolean;
   /** Car only: false while the model or the street under it is still loading. */
   onRoad: boolean;
+  /** True once enough of the spawn view has drawn to start in a real city. */
+  worldReady: boolean;
+  /** Progress toward `worldReady`, 0..1, for the menu's load rail. */
+  warmup: number;
   error: string | null;
 };
 
@@ -338,11 +360,19 @@ export function createSim(
 
   let tilesReady = false;
   let tilesError: string | null = null;
+  /** Warm-up: has the spawn view drawn enough to hand the player the controls? */
+  let worldReady = false;
+  let warmupClock = 0;
+  /** Set when the tile queue drains — a small view can be complete under the bar. */
+  let tilesDrained = false;
   tiles.addEventListener("load-root-tileset", () => {
     tilesReady = true;
     tilesError = null;
     reorient.transformLatLonHeightToOrigin(spawnLatLon().lat, spawnLatLon().lon, 0);
     emitHud();
+  });
+  tiles.addEventListener("tiles-load-end", () => {
+    tilesDrained = true;
   });
   tiles.addEventListener("load-model", (event) => {
     const sceneRoot = (event as { scene?: THREE.Object3D }).scene;
@@ -444,6 +474,11 @@ export function createSim(
     steerAngle = 0;
     blocked = false;
     reorient.transformLatLonHeightToOrigin(spawnLatLon().lat, spawnLatLon().lon, 0);
+    // A new city (or a restart) re-centres the tileset, so the world has to
+    // draw itself again before it is worth starting in.
+    worldReady = false;
+    warmupClock = 0;
+    tilesDrained = false;
     camInitialized = false;
     applyPoseToCraft();
     placeCamera(1);
@@ -739,6 +774,8 @@ export function createSim(
       speedKph: pose.speed * 3.6,
       blocked,
       onRoad: vehicle !== "car" || carGrounded,
+      worldReady,
+      warmup: worldReady ? 1 : clamp(tiles.visibleTiles.size / WARMUP_TILES, 0, 1),
       error: tilesError,
     });
   }
@@ -803,6 +840,26 @@ export function createSim(
     };
   };
 
+  /**
+   * Decide when the spawn view has enough city in it to start.
+   *
+   * Counting drawn tiles rather than watching `loadProgress`: the queue is
+   * empty before the first request goes out, so progress reads 1 at boot and
+   * says nothing about whether there is a city on screen yet.
+   */
+  function updateWarmup(dt: number) {
+    warmupClock += dt;
+    if (tilesError || warmupClock >= WARMUP_TIMEOUT) {
+      worldReady = true;
+      return;
+    }
+    if (!tilesReady) return;
+    const drawn = tiles.visibleTiles.size;
+    // A spawn that needs fewer than WARMUP_TILES tiles to cover the view is
+    // finished when the queue drains, so take that as done too.
+    if (drawn >= WARMUP_TILES || (tilesDrained && drawn > 0)) worldReady = true;
+  }
+
   function frame() {
     if (disposed) return;
     timer.update();
@@ -834,8 +891,13 @@ export function createSim(
     tiles.update();
     renderer.render(scene, camera);
 
+    if (!worldReady) {
+      updateWarmup(dt);
+      if (worldReady) emitHud();
+    }
+
     hudClock += dt;
-    const streaming = !tilesReady || (tiles.loadProgress ?? 0) < 0.95;
+    const streaming = !worldReady || !tilesReady || (tiles.loadProgress ?? 0) < 0.95;
     if (hudClock > (streaming ? 0.05 : 0.12)) {
       hudClock = 0;
       emitHud();
