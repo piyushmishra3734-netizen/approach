@@ -12,6 +12,7 @@ import {
 import { CITIES, CITY_ORDER, ION_GOOGLE_TILES, ION_TOKEN, type City, type CityId } from "./cities";
 import { createCraft } from "./craft";
 import { loadCar, WHEEL_IDS, type CarModel } from "./car";
+import { loadWalker, type Walker } from "./walker";
 import { createInput, type InputHandle } from "./input";
 import { createEngineAudio, type EngineAudio } from "./audio";
 
@@ -89,7 +90,7 @@ const CAR_MAX_DROP = 1.2;
  */
 const CAR_PROBE_UP = 2.4;
 /** Refined tiles the area needs before the car is allowed to land on it. */
-const CAR_LANDING_TILES = 8;
+const LANDING_TILES = 8;
 /**
  * While looking for the street to land on, the probe starts this far up
  * instead. A hand-placed spawn height is never exact, and a seed even slightly
@@ -99,7 +100,7 @@ const CAR_LANDING_TILES = 8;
  * ponytail: it would grab the underside of an overhang the spawn happens to
  * sit under — all four spawns are mid-boulevard, so nothing does.
  */
-const CAR_LANDING_PROBE_UP = 60;
+const LANDING_PROBE_UP = 60;
 /** How far ahead the spawn checks for a clear run, and the rise it tolerates. */
 const SPAWN_LOOK = 12;
 const SPAWN_CLEAR_RISE = 1.5;
@@ -120,6 +121,37 @@ const CAR_TILT_SMOOTH = 5.5;
  * rear bumper, and a shade lower, so the body fills the frame and the kerb
  * still shows.
  */
+/*
+ * On foot.
+ *
+ * The same raycast model as the car, at human numbers: no gravity, no collider,
+ * just the surface under the feet and two limits on what counts as a step. A
+ * person takes a kerb the car has to stop at, and stops at a drop the car would
+ * already have refused.
+ */
+const WALK_SPEED = 1.65;
+const WALK_RUN_SPEED = 5.2;
+const WALK_BACK_SPEED = 1.1;
+/** Legs do not coast, so speed is chased rather than integrated from a force. */
+const WALK_ACCEL = 7;
+/** Turning on the spot is quick, and slows as the pace picks up. */
+const WALK_TURN_RATE = 2.5;
+/**
+ * Rise the walker will take, as a gradient over the look-ahead. Stairs and San
+ * Francisco's steepest pavements sit under 1; a facade is far past it, so this
+ * doubles as what keeps the walk out of buildings.
+ */
+const WALK_MAX_CLIMB = 1.15;
+/** Drop taken in one frame. Past this it is a kerb edge, a pier, or a hole. */
+const WALK_MAX_DROP = 0.5;
+/** The probe starts just over the character's head, not at the plane's 300 m. */
+const WALK_PROBE_UP = 2.3;
+/** How quickly the body follows the ground. Photogrammetry is lumpy underfoot. */
+const WALK_SETTLE = 14;
+/** Over the shoulder, close enough that the city stays the subject. */
+const WALK_CHASE_OFFSET = new THREE.Vector3(0.55, 1.75, -3.1);
+const WALK_CHASE_LOOK = new THREE.Vector3(0, 1.35, 8);
+
 const CAR_CHASE_OFFSET = new THREE.Vector3(0, 1.9, -5.5);
 const CAR_CHASE_LOOK = new THREE.Vector3(0, 0.85, 8.5);
 
@@ -143,7 +175,7 @@ const CHASE_BANK = 0.12;
  * moves at a third of the speed — 2.4 km of visible city is a long way down
  * a boulevard.
  */
-const VIEW_DISTANCE: Record<Vehicle, number> = { plane: 7000, car: 3000 };
+const VIEW_DISTANCE: Record<Vehicle, number> = { plane: 7000, car: 3000, walk: 1600 };
 /** Haze closes the view before the streamed bubble ends, so nothing pops in. */
 const FOG_NEAR = 0.2;
 const FOG_FAR = 0.8;
@@ -169,7 +201,7 @@ const WARMUP_TILES = 12;
 const WARMUP_TIMEOUT = 12;
 
 export type CameraMode = "chase" | "cockpit";
-export type Vehicle = "plane" | "car";
+export type Vehicle = "plane" | "car" | "walk";
 
 export type HudSnapshot = {
   ready: boolean;
@@ -246,7 +278,9 @@ function spawnPose(city: City, vehicle: Vehicle = "plane"): Pose {
   // elevation; the wheel probes settle it onto the actual surface once the
   // tiles there refine. It never falls — a raycast vehicle is glued to the
   // surface, so there is no gravity to fall with.
-  if (vehicle === "car") {
+  // The car and the walker start on the same street — the flight spawn is a
+  // kilometre out over water, which is no use to either of them.
+  if (vehicle === "car" || vehicle === "walk") {
     return {
       ...base,
       heading: -city.drive.az,
@@ -301,6 +335,7 @@ export function createSim(
   let wheelSpin = 0;
   let blocked = false;
   let car: CarModel | null = null;
+  let walker: Walker | null = null;
   /**
    * Car only: the throttle the player is actually asking for. `pose.throttle`
    * is a speed readout for the HUD in the car, not a demand, and an engine
@@ -372,11 +407,32 @@ export function createSim(
       });
   }
 
+  // Half a megabyte, so no download button: picking Walk fetches it and the
+  // warm-up gate covers the wait.
+  if (vehicle === "walk") {
+    void loadWalker(`${import.meta.env.BASE_URL}models/robot.glb`)
+      .then((loaded) => {
+        if (disposed) {
+          loaded.dispose();
+          return;
+        }
+        walker = loaded;
+        scene.add(loaded.group);
+        applyPoseToCraft();
+        emitHud();
+      })
+      .catch((err) => {
+        console.error("[sim] character failed to load:", err);
+        tilesError = "Couldn't load the character";
+        emitHud();
+      });
+  }
+
   const dracoLoader = new DRACOLoader();
   dracoLoader.setDecoderPath(DRACO_GLTF_CONFIG);
 
   const tiles = new TilesRenderer();
-  const spawn0 = vehicle === "car" ? city.drive : city;
+  const spawn0 = vehicle === "plane" ? city : city.drive;
   const reorient = new ReorientationPlugin({
     lat: spawn0.lat,
     lon: spawn0.lon,
@@ -454,11 +510,11 @@ export function createSim(
   /** The object the camera follows: the car once it is loaded, else the plane. */
   /** The lat/lon the tileset is centred on, which differs per vehicle. */
   function spawnLatLon() {
-    return vehicle === "car" ? city.drive : city;
+    return vehicle === "plane" ? city : city.drive;
   }
 
   function body(): THREE.Object3D {
-    return car?.group ?? craft;
+    return walker?.group ?? car?.group ?? craft;
   }
 
   function applyPoseToCraft() {
@@ -472,7 +528,26 @@ export function createSim(
 
   function placeCamera(dt: number) {
     const obj = body();
-    if (vehicle === "car") {
+    if (vehicle === "walk") {
+      if (cameraMode === "cockpit") {
+        // First person, from the character's own eyes.
+        tmpCam
+          .copy(walker?.eyePoint ?? COCKPIT_OFFSET)
+          .applyQuaternion(obj.quaternion)
+          .add(obj.position);
+        tmpLook
+          .set(0, (walker?.eyePoint.y ?? 1.6) - 0.05, 30)
+          .applyQuaternion(obj.quaternion)
+          .add(obj.position);
+      } else {
+        // Over the shoulder, on heading only — a walker's body does not bank,
+        // and the ground under it is too lumpy to inherit pitch from.
+        followEuler.set(0, pose.heading, 0);
+        followQuat.setFromEuler(followEuler);
+        tmpCam.copy(WALK_CHASE_OFFSET).applyQuaternion(followQuat).add(obj.position);
+        tmpLook.copy(WALK_CHASE_LOOK).applyQuaternion(followQuat).add(obj.position);
+      }
+    } else if (vehicle === "car") {
       if (cameraMode === "cockpit") {
         // FPP sits in the driver's seat and looks out over the bonnet.
         tmpCam.copy(car?.eyePoint ?? COCKPIT_OFFSET).applyQuaternion(obj.quaternion).add(obj.position);
@@ -495,7 +570,8 @@ export function createSim(
       tmpCam.copy(CHASE_OFFSET).applyQuaternion(followQuat).add(obj.position);
       tmpLook.copy(CHASE_LOOK).applyQuaternion(followQuat).add(obj.position);
     }
-    const follow = cameraMode === "cockpit" ? 20 : vehicle === "car" ? 7.5 : 10;
+    const follow =
+      cameraMode === "cockpit" ? 20 : vehicle === "car" ? 7.5 : vehicle === "walk" ? 9 : 10;
     const alpha = camInitialized ? 1 - Math.exp(-follow * dt) : 1;
     camPos.lerp(tmpCam, alpha);
     lookPos.lerp(tmpLook, alpha);
@@ -510,7 +586,7 @@ export function createSim(
   function resetTo(next: City) {
     city = next;
     pose = spawnPose(city, vehicle);
-    carGrounded = false;
+    grounded = false;
     arrivalHeight = Number.NaN;
     lastRestY = Number.NaN;
     steerAngle = 0;
@@ -547,7 +623,7 @@ export function createSim(
   }
 
   /** True once the tiles under the spawn have resolved and the car has landed. */
-  let carGrounded = false;
+  let grounded = false;
   /** Last candidate street height, used to require two agreeing samples. */
   let arrivalHeight = Number.NaN;
   /** Surface height under the wheels last frame, for the cliff-edge test. */
@@ -564,8 +640,8 @@ export function createSim(
     // Before the first landing the car is still parked at the flight spawn
     // height, so the probe has to reach the whole way down to the street; after
     // that it is sitting on the road and the short reach is enough.
-    const down = carGrounded ? GROUND_PROBE_DOWN : MAX_HEIGHT;
-    const up = carGrounded ? CAR_PROBE_UP : CAR_LANDING_PROBE_UP;
+    const down = grounded ? GROUND_PROBE_DOWN : MAX_HEIGHT;
+    const up = grounded ? CAR_PROBE_UP : LANDING_PROBE_UP;
     return groundHeightAt(pose.x + wheelWorld.x, pose.y, pose.z + wheelWorld.z, down, up);
   }
 
@@ -638,17 +714,119 @@ export function createSim(
     return wrapPi(best);
   }
 
+  /**
+   * Walking.
+   *
+   * The same shape as the car: settle onto the street once the tiles under the
+   * spawn have refined, then move across the surface with a look-ahead that
+   * refuses walls and a per-frame limit that refuses drops. No gravity, because
+   * there is nothing to fall onto — the ground is whatever streamed in.
+   */
+  function integrateWalk(dt: number) {
+    if (!walker) return;
+
+    if (!grounded) {
+      // Coarse tiles read tens of metres off and refine as they stream, so
+      // wait for the area to sharpen and for two samples to agree before
+      // committing — landing on the first drops the character through the city.
+      if (tiles.visibleTiles.size < LANDING_TILES) return;
+      const found = groundHeightAt(pose.x, pose.y, pose.z, MAX_HEIGHT, LANDING_PROBE_UP);
+      if (found === null) return;
+      if (Math.abs(found - arrivalHeight) > 2) {
+        arrivalHeight = found;
+        return;
+      }
+      grounded = true;
+      lastRestY = found;
+      pose.y = found;
+      pose.pitch = 0;
+      pose.roll = 0;
+      pose.heading = clearestHeading(pose.heading, found);
+      camInitialized = false;
+      return;
+    }
+
+    const axes = input.sample();
+    // A/D arrive on the roll axis (A = -1) and left must increase heading, the
+    // same as the car. This negation is the only sign flip in the turn path —
+    // the control self-test covers it, do not "fix" it blind.
+    const turnInput = -axes.roll;
+    const driveInput = axes.pitch;
+    const running = axes.throttle > 0.5;
+
+    pose.heading = wrapPi(pose.heading + turnInput * WALK_TURN_RATE * dt);
+
+    const top = running ? WALK_RUN_SPEED : WALK_SPEED;
+    const target =
+      driveInput > 0.02
+        ? driveInput * top
+        : driveInput < -0.02
+          ? driveInput * WALK_BACK_SPEED
+          : 0;
+    pose.speed += (target - pose.speed) * Math.min(1, WALK_ACCEL * dt);
+    if (Math.abs(pose.speed) < 0.02) pose.speed = 0;
+    pose.throttle = Math.abs(pose.speed) / WALK_RUN_SPEED;
+
+    // Look ahead about a stride. The two probes start at different heights for
+    // the same reason the car's do: underfoot we want the pavement, ahead we
+    // want to know whether a building is standing there, and a low probe would
+    // start inside its ground floor and report that as open pavement.
+    const reach = 0.9 + Math.abs(pose.speed) * 0.3;
+    const dir = Math.sign(pose.speed) || 1;
+    const here = groundHeightAt(pose.x, pose.y, pose.z, GROUND_PROBE_DOWN, WALK_PROBE_UP);
+    const ahead = groundHeightAt(
+      pose.x + Math.sin(pose.heading) * reach * dir,
+      pose.y,
+      pose.z + Math.cos(pose.heading) * reach * dir,
+      GROUND_PROBE_DOWN,
+      WALL_PROBE_UP,
+    );
+    blocked = here !== null && ahead !== null && ahead - here > reach * WALK_MAX_CLIMB;
+    if (blocked) {
+      pose.speed = 0;
+      return;
+    }
+
+    const prevX = pose.x;
+    const prevZ = pose.z;
+    pose.x += Math.sin(pose.heading) * pose.speed * dt;
+    pose.z += Math.cos(pose.heading) * pose.speed * dt;
+
+    const restY = groundHeightAt(pose.x, pose.y, pose.z, GROUND_PROBE_DOWN, WALK_PROBE_UP);
+    if (restY === null) {
+      // Walked off the edge of what has streamed in. Stay put rather than
+      // stepping into nothing, and wait for the tiles to catch up.
+      pose.x = prevX;
+      pose.z = prevZ;
+      pose.speed = 0;
+      return;
+    }
+    // Compare against the surface underfoot last frame, not the body: measuring
+    // the body deadlocks it, exactly as it did for the car.
+    const drop = restY - lastRestY;
+    lastRestY = restY;
+    if (drop < -WALK_MAX_DROP) {
+      pose.x = prevX;
+      pose.z = prevZ;
+      lastRestY = here ?? restY;
+      blocked = true;
+      pose.speed = 0;
+      return;
+    }
+    pose.y += (restY - pose.y) * (1 - Math.exp(-WALK_SETTLE * dt));
+  }
+
   function integrateCar(dt: number) {
     if (!car) return;
 
     // Held at the spawn height until the street below has streamed in, then
     // placed on it once — no long fall, and no driving around in mid-air.
-    if (!carGrounded) {
+    if (!grounded) {
       // The root tileset is a coarse shell that can sit a hundred metres off
       // the real street, and it is stable while it is the only thing loaded —
       // so agreeing samples alone are not enough to trust it. Wait until the
       // area has actually refined before committing the car to a surface.
-      if (tiles.visibleTiles.size < CAR_LANDING_TILES) return;
+      if (tiles.visibleTiles.size < LANDING_TILES) return;
       if (!sampleWheels()) return;
       const { restY, targetPitch, targetRoll } = wheelContact(car);
       // Coarse tiles read tens of metres off and refine as they stream, so wait
@@ -658,7 +836,7 @@ export function createSim(
         arrivalHeight = restY;
         return;
       }
-      carGrounded = true;
+      grounded = true;
       lastRestY = restY;
       pose.y = restY;
       pose.pitch = targetPitch;
@@ -759,6 +937,10 @@ export function createSim(
 
   function integrate(dt: number) {
     if (!flying) return;
+    if (vehicle === "walk") {
+      integrateWalk(dt);
+      return;
+    }
     if (vehicle === "car") {
       integrateCar(dt);
       return;
@@ -816,7 +998,7 @@ export function createSim(
       vehicle,
       speedKph: pose.speed * 3.6,
       blocked,
-      onRoad: vehicle !== "car" || carGrounded,
+      onRoad: vehicle === "plane" || grounded,
       worldReady,
       warmup: worldReady ? 1 : clamp(tiles.visibleTiles.size / WARMUP_TILES, 0, 1),
       error: tilesError,
@@ -859,13 +1041,19 @@ export function createSim(
       wheelRadius: car?.wheelRadius ?? null,
       speed: pose.speed,
       blocked,
-      grounded: carGrounded,
+      grounded: grounded,
       heading: pose.heading,
       compass: compassDeg(pose.heading),
       // Report the surface the way the active vehicle actually probes it.
       ground:
-        vehicle === "car"
-          ? groundHeightAt(pose.x, pose.y, pose.z, MAX_HEIGHT, CAR_PROBE_UP)
+        vehicle === "car" || vehicle === "walk"
+          ? groundHeightAt(
+              pose.x,
+              pose.y,
+              pose.z,
+              MAX_HEIGHT,
+              vehicle === "walk" ? WALK_PROBE_UP : CAR_PROBE_UP,
+            )
           : groundHeightAt(pose.x, pose.y, pose.z, MAX_HEIGHT),
       wallAhead: groundHeightAt(
         pose.x + Math.sin(pose.heading) * 4,
@@ -899,6 +1087,8 @@ export function createSim(
    * the frame loop.
    */
   function ensureAudio() {
+    // Nothing to run on foot — the engine audio is for engines.
+    if (vehicle === "walk") return;
     if (!audioWanted || engineAudio || audioLoading) return;
     audioLoading = true;
     void createEngineAudio(vehicle, import.meta.env.BASE_URL)
@@ -956,7 +1146,14 @@ export function createSim(
     integrate(dt);
     applyPoseToCraft();
     placeCamera(dt);
-    if (vehicle === "car") {
+    if (vehicle === "walk") {
+      // The gait is driven by the ground speed, not by the key held: blocked
+      // against a wall the legs stop, which is what the player sees anyway.
+      walker?.update(dt, pose.speed);
+      // Hide the character in first person — from inside its own head all you
+      // would see is the back of its face.
+      if (walker) walker.group.visible = cameraMode !== "cockpit";
+    } else if (vehicle === "car") {
       // The interior is modelled, so the car stays drawn in FPP — hiding it
       // would leave the driver looking through a missing dashboard.
       if (car) car.group.visible = true;
@@ -975,6 +1172,7 @@ export function createSim(
       speed: pose.speed,
       topSpeed: vehicle === "car" ? CAR_TOP_SPEED : MAX_SPEED,
       throttle: vehicle === "car" ? carThrottle : pose.throttle,
+      // The walker never reaches here: `ensureAudio` builds nothing on foot.
     });
 
     if (!worldReady) {
@@ -1006,6 +1204,7 @@ export function createSim(
       sky.geo.dispose();
       if (typeof craft.userData.dispose === "function") craft.userData.dispose();
       car?.dispose();
+      walker?.dispose();
       renderer.domElement.remove();
       if (window.__controlsTest === probe) delete window.__controlsTest;
     },

@@ -132,7 +132,7 @@ function readStoredAssets(): AssetTier {
 function readStoredVehicle(): Vehicle {
   try {
     const v = localStorage.getItem(VEHICLE_KEY);
-    if (v === "plane" || v === "car") return v;
+    if (v === "plane" || v === "car" || v === "walk") return v;
   } catch {
     /* private mode */
   }
@@ -610,24 +610,39 @@ export function FlightApp() {
 
   const city = CITIES[cityId];
   const isCar = vehicle === "car";
+  const isWalk = vehicle === "walk";
+  /** Ground vehicles share the HUD: speed in km/h, elevation instead of altitude. */
+  const onFoot = isCar || isWalk;
   const carPercent = carBytes.total
     ? Math.round((carBytes.received / carBytes.total) * 100)
     : 0;
   const controlHint = touchUi
-    ? isCar
-      ? "Stick to steer · Throttle and brake on the right · Eye button for the driver's seat"
-      : "Left stick to bank and pitch · Throttle and brake on the right"
-    : isCar
-      ? "W/S throttle and brake · A/D steer · V chase / driver's seat · R reset · Esc pause"
-      : "W/S pitch · A/D roll · Q/E yaw · Shift throttle · V view · Esc pause";
+    ? isWalk
+      ? "Stick to walk and turn · Hold thrust to run · Eye button for first person"
+      : isCar
+        ? "Stick to steer · Throttle and brake on the right · Eye button for the driver's seat"
+        : "Left stick to bank and pitch · Throttle and brake on the right"
+    : isWalk
+      ? "W/S walk · A/D turn · Shift to run · V shoulder / first person · R reset · Esc pause"
+      : isCar
+        ? "W/S throttle and brake · A/D steer · V chase / driver's seat · R reset · Esc pause"
+        : "W/S pitch · A/D roll · Q/E yaw · Shift throttle · V view · Esc pause";
   const shortHint = touchUi
-    ? isCar
-      ? "Stick to steer · Throttle and brake on the right"
-      : "Stick to fly · Throttle and brake on the right"
+    ? isWalk
+      ? "Stick to walk · Hold thrust to run"
+      : isCar
+        ? "Stick to steer · Throttle and brake on the right"
+        : "Stick to fly · Throttle and brake on the right"
+    : isWalk
+      ? "W/S walk · A/D turn · Shift run"
+      : isCar
+        ? "W/S throttle · A/D steer · V view"
+        : "W/S pitch · A/D roll · Shift throttle";
+  const pausedHint = isWalk
+    ? "Esc resume · V shoulder / first person"
     : isCar
-      ? "W/S throttle · A/D steer · V view"
-      : "W/S pitch · A/D roll · Shift throttle";
-  const pausedHint = isCar ? "Esc resume · V chase / driver's seat" : "Esc resume · V chase / cockpit";
+      ? "Esc resume · V chase / driver's seat"
+      : "Esc resume · V chase / cockpit";
   const rawProgress = hud.progress;
   const progressPct = Math.round(rawProgress > 1 ? rawProgress : rawProgress * 100);
   const progress = Math.min(100, Math.max(0, progressPct));
@@ -642,7 +657,7 @@ export function FlightApp() {
   // tileset, or a warm-up that has not drawn its first tile.
   const waitRail = streaming && railPct <= 2 && (!hud.ready || !hud.worldReady);
   const status = loadLabel(simReady, hud, progress, bootError);
-  const findingRoad = flying && isCar && !hud.onRoad && !hud.error && !bootError;
+  const findingRoad = flying && onFoot && !hud.onRoad && !hud.error && !bootError;
   const showStreamChip = flying && (!hud.ready || findingRoad) && !hud.error;
   const showErrorChip = Boolean((hud.error && !hud.ready) || bootError);
 
@@ -725,16 +740,22 @@ export function FlightApp() {
               {bootError
                 ? "The 3D view couldn't start on this device."
                 : hud.error && !hud.ready
-                  ? isCar
-                    ? `${city.hint}. City tiles didn't load — there is no road to drive on.`
+                  ? onFoot
+                    ? `${city.hint}. City tiles didn't load — there is no ground to stand on.`
                     : `${city.hint}. City tiles didn't load — you can still fly the empty sky.`
-                  : `${city.hint}. Photogrammetry of the city, streamed as you ${isCar ? "drive" : "fly"}.`}
+                  : `${city.hint}. Photogrammetry of the city, streamed as you ${
+                      isWalk ? "walk" : isCar ? "drive" : "fly"
+                    }.`}
             </p>
           </div>
 
           <div className="flex flex-col gap-5">
             <div className="rise rise-4 flex flex-col gap-3">
-              <div className="flex flex-col gap-3 sm:flex-row" role="group" aria-label="Start">
+              <div
+                className="flex flex-col gap-3 sm:flex-row sm:flex-wrap"
+                role="group"
+                aria-label="Start"
+              >
                 <button
                   ref={flyBtnRef}
                   type="button"
@@ -782,6 +803,24 @@ export function FlightApp() {
                           : carState === "failed"
                             ? "Retry car"
                             : `Get car · ${CAR_DOWNLOAD_MB} MB`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => startWith("walk")}
+                  disabled={!canStart}
+                  className={`btn-press h-12 w-full rounded-md px-6 text-sm font-medium tracking-label uppercase disabled:opacity-40 sm:w-44 ${
+                    vehicle === "walk"
+                      ? "bg-accent text-bg hover:opacity-90"
+                      : "border border-line text-fg hover:border-fg/40"
+                  }`}
+                >
+                  {bootError
+                    ? "Unavailable"
+                    : !simReady
+                      ? "Preparing"
+                      : !hud.worldReady
+                        ? "Loading"
+                        : "Walk"}
                 </button>
               </div>
 
@@ -943,16 +982,16 @@ export function FlightApp() {
         >
           <div className={`flex flex-col gap-1 ${touchUi ? "" : "pb-12"}`}>
             <span className="font-mono text-xs tracking-label text-muted uppercase">
-              {isCar ? "Speed" : "IAS"}
+              {onFoot ? "Speed" : "IAS"}
             </span>
             <span className="font-mono text-2xl tabular-nums tracking-hud">
-              {Math.round(isCar ? Math.abs(hud.speedKph) : hud.speedKt)}
-              <span className="ml-2 text-xs text-muted">{isCar ? "km/h" : "kt"}</span>
+              {Math.round(onFoot ? Math.abs(hud.speedKph) : hud.speedKt)}
+              <span className="ml-2 text-xs text-muted">{onFoot ? "km/h" : "kt"}</span>
             </span>
           </div>
           <div className={`flex flex-col items-end gap-1 ${touchUi ? "" : "pb-12"}`}>
             <span className="font-mono text-xs tracking-label text-muted uppercase">
-              {isCar ? "Elev" : "Alt"}
+              {onFoot ? "Elev" : "Alt"}
             </span>
             <span className="font-mono text-2xl tabular-nums tracking-hud">
               {formatAlt(hud.altitudeFt)}
@@ -989,7 +1028,9 @@ export function FlightApp() {
             ? "3D view unavailable"
             : "City tiles unavailable"
           : findingRoad
-            ? "Finding the road"
+            ? isWalk
+              ? "Finding the pavement"
+              : "Finding the road"
             : "Streaming city"}
       </div>
 

@@ -9,6 +9,7 @@ Game code is small and lives in a handful of files:
 - `src/game/sim.ts` — flight physics + world update loop
 - `src/game/craft.ts` — aircraft mesh, livery, procedural materials
 - `src/game/audio.ts` — engine sound (High asset tier only; see below)
+- `src/game/walker.ts` — the on-foot character: model, scale, gait animation
 - `src/game/input.ts` — keyboard/pointer/touch mapping
 - `src/game/cities.ts` — world/city placement data
 - `src/components/flight-app.tsx` — canvas host, HUD, React shell
@@ -57,6 +58,10 @@ belongs in High, not in the default path.
 Sample provenance and licence are in `public/audio/CREDITS.md`. The car model
 (`public/models/lamborghini.glb`, ~18 MB) stays a separate explicit download
 on its own button — it is not part of the tier.
+
+The walking character (`public/models/robot.glb`, ~0.5 MB, CC0 — see
+`public/models/CREDITS.md`) is small enough to fetch the moment someone picks
+Walk, so it has neither a button nor a tier.
 
 ## Expiring: the Cesium ion token
 
