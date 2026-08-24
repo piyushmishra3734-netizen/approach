@@ -13,6 +13,7 @@ import { CITIES, CITY_ORDER, ION_GOOGLE_TILES, ION_TOKEN, type City, type CityId
 import { createCraft } from "./craft";
 import { loadCar, WHEEL_IDS, type CarModel } from "./car";
 import { createInput, type InputHandle } from "./input";
+import { createEngineAudio, type EngineAudio } from "./audio";
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
@@ -112,8 +113,15 @@ const WALL_PROBE_UP = 120;
 /** Suspension smoothing. Raw photogrammetry is lumpy at wheel scale. */
 const CAR_BODY_SMOOTH = 9;
 const CAR_TILT_SMOOTH = 5.5;
-const CAR_CHASE_OFFSET = new THREE.Vector3(0, 2.15, -7.4);
-const CAR_CHASE_LOOK = new THREE.Vector3(0, 0.9, 9);
+/*
+ * Car chase cam. Sat 7.4 m back, which put three car lengths of empty road
+ * between the player and the Lamborghini and made it read as something being
+ * watched rather than driven. Pulled in to just over a car length behind the
+ * rear bumper, and a shade lower, so the body fills the frame and the kerb
+ * still shows.
+ */
+const CAR_CHASE_OFFSET = new THREE.Vector3(0, 1.9, -5.5);
+const CAR_CHASE_LOOK = new THREE.Vector3(0, 0.85, 8.5);
 
 const CHASE_OFFSET = new THREE.Vector3(0, 6.0, -30);
 const CHASE_LOOK = new THREE.Vector3(0, 0.45, 20);
@@ -196,6 +204,8 @@ export type SimHandle = {
   /** Put the vehicle back at the spawn — the R key, for the touch UI. */
   restart: () => void;
   setFlying: (v: boolean) => void;
+  /** High asset tier only: engine audio on or off, live. */
+  setSound: (on: boolean) => void;
   setTouch: (partial: Partial<{ pitch: number; roll: number; yaw: number; throttle: number }>) => void;
 };
 
@@ -277,6 +287,7 @@ export function createSim(
   onHud: (hud: HudSnapshot) => void,
   initialCity: CityId = "sf",
   vehicle: Vehicle = "plane",
+  soundOn = false,
 ): SimHandle {
   let city = CITIES[initialCity] ?? CITIES.sf;
   let pose = spawnPose(city, vehicle);
@@ -290,6 +301,15 @@ export function createSim(
   let wheelSpin = 0;
   let blocked = false;
   let car: CarModel | null = null;
+  /**
+   * Car only: the throttle the player is actually asking for. `pose.throttle`
+   * is a speed readout for the HUD in the car, not a demand, and an engine
+   * driven off it never lifts.
+   */
+  let carThrottle = 0;
+  let engineAudio: EngineAudio | null = null;
+  let audioWanted = soundOn;
+  let audioLoading = false;
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -655,6 +675,7 @@ export function createSim(
     // steering path. Proved by the control self-test, do not "fix" it blind.
     const steerInput = -axes.roll;
     const throttleInput = axes.pitch;
+    carThrottle = Math.max(0, throttleInput);
 
     // Speed. Brake first, then reverse; drag always pulls back toward zero.
     const speedFactor = 1 / (1 + Math.abs(pose.speed) / CAR_STEER_FALLOFF);
@@ -833,6 +854,7 @@ export function createSim(
       cam: camera.position.toArray(),
       craft: body().position.toArray(),
       vehicle,
+      flying,
       steer: steerAngle,
       wheelRadius: car?.wheelRadius ?? null,
       speed: pose.speed,
@@ -860,11 +882,43 @@ export function createSim(
       visible: tiles.visibleTiles.size,
       ready: tilesReady,
       worldReady,
+      audioWanted,
+      audioOn: engineAudio !== null,
+      audioLoading,
       warmupClock,
       tilesDrained,
       tilesError,
     };
   };
+
+  /**
+   * Build the engine audio, once, from inside a user gesture.
+   *
+   * Every browser refuses to start an AudioContext outside one, so this is
+   * only ever reached from the start press or the settings toggle — never from
+   * the frame loop.
+   */
+  function ensureAudio() {
+    if (!audioWanted || engineAudio || audioLoading) return;
+    audioLoading = true;
+    void createEngineAudio(vehicle, import.meta.env.BASE_URL)
+      .then((made) => {
+        audioLoading = false;
+        if (!made) return;
+        // The player may have switched it off again, or left, while the pack
+        // was downloading.
+        if (disposed || !audioWanted) {
+          made.dispose();
+          return;
+        }
+        engineAudio = made;
+        engineAudio.setMuted(!flying);
+      })
+      .catch((err) => {
+        audioLoading = false;
+        console.error("[sim] engine audio failed:", err);
+      });
+  }
 
   /**
    * Decide when the spawn view has enough city in it to start.
@@ -917,6 +971,12 @@ export function createSim(
     tiles.update();
     renderer.render(scene, camera);
 
+    engineAudio?.update({
+      speed: pose.speed,
+      topSpeed: vehicle === "car" ? CAR_TOP_SPEED : MAX_SPEED,
+      throttle: vehicle === "car" ? carThrottle : pose.throttle,
+    });
+
     if (!worldReady) {
       updateWarmup(dt);
       if (worldReady) emitHud();
@@ -938,6 +998,7 @@ export function createSim(
       renderer.setAnimationLoop(null);
       ro.disconnect();
       input.dispose();
+      engineAudio?.dispose();
       tiles.dispose();
       dracoLoader.dispose();
       renderer.dispose();
@@ -951,6 +1012,10 @@ export function createSim(
     start: () => {
       flying = true;
       pose.throttle = Math.max(pose.throttle, 0.4);
+      // This call is inside the click or keypress that started the game, which
+      // is the only moment an AudioContext is allowed to open.
+      ensureAudio();
+      engineAudio?.setMuted(false);
       emitHud();
     },
     setCity: (id) => {
@@ -965,7 +1030,20 @@ export function createSim(
     },
     setFlying: (v) => {
       flying = v;
+      // Pausing kills the engine note rather than leaving it droning under the
+      // pause card.
+      engineAudio?.setMuted(!v);
       emitHud();
+    },
+    setSound: (on) => {
+      audioWanted = on;
+      if (on) {
+        ensureAudio();
+        engineAudio?.setMuted(!flying);
+      } else {
+        engineAudio?.dispose();
+        engineAudio = null;
+      }
     },
     setTouch: (partial) => {
       if (partial.pitch != null) input.touch.pitch = partial.pitch;

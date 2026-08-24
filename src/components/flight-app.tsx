@@ -32,9 +32,26 @@ const STICK_RADIUS = 56;
 const STICK_DEADZONE = 0.14;
 const CITY_KEY = "approach.city";
 const VEHICLE_KEY = "approach.vehicle";
+const ASSETS_KEY = "approach.assets";
+
+/**
+ * How much the game is allowed to download beyond the city tiles.
+ *
+ * Low is the default and is the game as it shipped: nothing extra, and silent.
+ * High buys engine audio — the sampled car loops plus the synthesised plane —
+ * and anything else added later belongs here rather than in the default path.
+ */
+type AssetTier = "low" | "high";
+
+/** Rounded size of the sound pack, for the label before the fetch reports one. */
+const AUDIO_PACK_KB = 110;
 
 function mb(bytes: number) {
   return (bytes / 1048576).toFixed(1);
+}
+
+function kb(bytes: number) {
+  return Math.round(bytes / 1024);
 }
 
 function padHeading(deg: number) {
@@ -66,6 +83,15 @@ function readStoredCity(): CityId {
   return "sf";
 }
 
+function readStoredAssets(): AssetTier {
+  try {
+    if (localStorage.getItem(ASSETS_KEY) === "high") return "high";
+  } catch {
+    /* private mode */
+  }
+  return "low";
+}
+
 function readStoredVehicle(): Vehicle {
   try {
     const v = localStorage.getItem(VEHICLE_KEY);
@@ -94,6 +120,7 @@ export function FlightApp() {
   const offsetRef = useRef({ x: 0, y: 0 });
   const cityRef = useRef<CityId>("sf");
   const vehicleRef = useRef<Vehicle>("plane");
+  const assetsRef = useRef<AssetTier>("low");
   const pendingStart = useRef(false);
   /** Latest `hud.worldReady`, so the start gate does not re-bind the key handler. */
   const worldReadyRef = useRef(false);
@@ -114,8 +141,12 @@ export function FlightApp() {
   const [canFullscreen, setCanFullscreen] = useState(false);
   const [carState, setCarState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
   const [carBytes, setCarBytes] = useState({ received: 0, total: 0 });
+  const [assets, setAssets] = useState<AssetTier>("low");
+  const [packState, setPackState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
+  const [packBytes, setPackBytes] = useState({ received: 0, total: 0 });
   cityRef.current = cityId;
   vehicleRef.current = vehicle;
+  assetsRef.current = assets;
   worldReadyRef.current = hud.worldReady;
 
   useEffect(() => {
@@ -123,16 +154,19 @@ export function FlightApp() {
     if (storedCity !== cityRef.current) setCityId(storedCity);
     const storedVehicle = readStoredVehicle();
     if (storedVehicle !== vehicleRef.current) setVehicle(storedVehicle);
+    const storedAssets = readStoredAssets();
+    if (storedAssets !== assetsRef.current) setAssets(storedAssets);
   }, []);
 
   useEffect(() => {
     try {
       localStorage.setItem(CITY_KEY, cityId);
       localStorage.setItem(VEHICLE_KEY, vehicle);
+      localStorage.setItem(ASSETS_KEY, assets);
     } catch {
       /* private mode */
     }
-  }, [cityId, vehicle]);
+  }, [cityId, vehicle, assets]);
 
   useEffect(() => {
     const coarse = window.matchMedia("(pointer: coarse)");
@@ -157,7 +191,13 @@ export function FlightApp() {
       .then(({ createSim }) => {
         if (cancelled || !mountRef.current) return;
         try {
-          handle = createSim(mountRef.current, setHud, cityRef.current, vehicleRef.current);
+          handle = createSim(
+            mountRef.current,
+            setHud,
+            cityRef.current,
+            vehicleRef.current,
+            assetsRef.current === "high",
+          );
         } catch {
           setBootError(true);
           return;
@@ -213,6 +253,35 @@ export function FlightApp() {
     void import("@/game/car").then(({ isCarDownloaded }) => {
       if (isCarDownloaded()) setCarState("ready");
     });
+    void import("@/game/audio").then(({ isPackDownloaded }) => {
+      if (isPackDownloaded()) setPackState("ready");
+    });
+  }, []);
+
+  /**
+   * Switch asset tier. High fetches the sound pack and turns the engine on in
+   * the running sim; the press itself is the user gesture the AudioContext
+   * needs, so the sound starts here or not at all.
+   */
+  const chooseAssets = useCallback((next: AssetTier) => {
+    setAssets(next);
+    assetsRef.current = next;
+    if (next === "low") {
+      simRef.current?.setSound(false);
+      return;
+    }
+    simRef.current?.setSound(true);
+    setPackState((current) => (current === "ready" ? current : "downloading"));
+    void import("@/game/audio")
+      .then(({ isPackDownloaded, downloadAudioPack }) =>
+        isPackDownloaded()
+          ? null
+          : downloadAudioPack(import.meta.env.BASE_URL, (received, total) =>
+              setPackBytes({ received, total }),
+            ),
+      )
+      .then(() => setPackState("ready"))
+      .catch(() => setPackState("failed"));
   }, []);
 
   /** Fetch the car model on an explicit press, showing progress as it comes. */
@@ -605,6 +674,45 @@ export function FlightApp() {
                   {CITIES[id].name}
                 </button>
               ))}
+            </div>
+
+            <div className="rise rise-6 flex flex-col gap-2">
+              <div className="flex items-center gap-4">
+                <span className="font-mono text-xs tracking-label text-muted uppercase">Assets</span>
+                <div
+                  className="flex gap-1 rounded-md border border-line p-1"
+                  role="group"
+                  aria-label="Asset quality"
+                >
+                  {(["low", "high"] as AssetTier[]).map((tier) => (
+                    <button
+                      key={tier}
+                      type="button"
+                      onClick={() => chooseAssets(tier)}
+                      aria-pressed={assets === tier}
+                      className={`btn-press h-8 rounded px-4 font-mono text-xs tracking-hud uppercase ${
+                        assets === tier ? "bg-accent text-bg" : "text-dim hover:text-fg"
+                      }`}
+                    >
+                      {tier}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p
+                className="max-w-sm font-mono text-xs leading-relaxed tracking-hud text-dim"
+                aria-live="polite"
+              >
+                {assets === "low"
+                  ? "Low · nothing beyond the city tiles, and no sound."
+                  : packState === "failed"
+                    ? "Sound pack failed — press High again to retry."
+                    : packState === "downloading"
+                      ? `Sound pack · ${kb(packBytes.received)} / ${
+                          packBytes.total ? kb(packBytes.total) : AUDIO_PACK_KB
+                        } KB`
+                      : `High · engine sound for the plane and the car (${AUDIO_PACK_KB} KB).`}
+              </p>
             </div>
           </div>
         </div>
