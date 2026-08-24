@@ -56,6 +56,28 @@
     -webkit-user-select: none;
   }
 
+  /*
+   * Hand the browser its own pull-to-refresh back, on the menu and the pause
+   * card only.
+   *
+   * The rules above are what disable it: `touch-action: none` and
+   * `overscroll-behavior: none` on the document are the documented way to stop
+   * a downward drag from reloading, and the game needs them — the flight stick
+   * is a downward drag. But they apply to the whole document, so a phone had no
+   * refresh gesture anywhere. The class goes on <html> while the game is not
+   * being played, and comes off the moment it is.
+   *
+   * `position: fixed` on the body stays, so this only wakes the browsers whose
+   * gesture does not need a scrollable root (Chrome and friends on Android).
+   * Where it stays asleep, the app's own pull gesture covers it.
+   */
+  html.allow-pull-refresh,
+  html.allow-pull-refresh body,
+  html.allow-pull-refresh #app {
+    touch-action: pan-y;
+    overscroll-behavior-y: auto;
+  }
+
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;

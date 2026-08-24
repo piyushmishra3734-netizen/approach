@@ -217,6 +217,18 @@ export function FlightApp() {
   }, []);
 
   /**
+   * Let the browser's own pull-to-refresh work while the game is not being
+   * played. The class relaxes `touch-action` and `overscroll-behavior` on the
+   * document; see the rule in `styles.css` for why they are off by default.
+   */
+  useEffect(() => {
+    const root = document.documentElement;
+    const idle = menu || paused;
+    root.classList.toggle("allow-pull-refresh", idle);
+    return () => root.classList.remove("allow-pull-refresh");
+  }, [menu, paused]);
+
+  /**
    * Pull down to reload, on the menu and the pause card only.
    *
    * The browser's own pull-to-refresh is off for the whole document on
@@ -230,6 +242,10 @@ export function FlightApp() {
     let startY = 0;
     let tracking = false;
     let distance = 0;
+    let leaving = false;
+    const onLeave = () => {
+      leaving = true;
+    };
 
     const onStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
@@ -252,15 +268,21 @@ export function FlightApp() {
       const reached = distance >= PULL_TRIGGER;
       distance = 0;
       setPull(0);
-      if (reached) void hardReload();
+      // The browser may have taken this same drag as its own pull-to-refresh
+      // and already be reloading; a second one on top of it is noise.
+      if (reached && !leaving) void hardReload();
     };
 
+    window.addEventListener("pagehide", onLeave);
+    window.addEventListener("beforeunload", onLeave);
     window.addEventListener("touchstart", onStart, { passive: true });
     window.addEventListener("touchmove", onMove, { passive: true });
     window.addEventListener("touchend", onEnd, { passive: true });
     window.addEventListener("touchcancel", onEnd, { passive: true });
     return () => {
       setPull(0);
+      window.removeEventListener("pagehide", onLeave);
+      window.removeEventListener("beforeunload", onLeave);
       window.removeEventListener("touchstart", onStart);
       window.removeEventListener("touchmove", onMove);
       window.removeEventListener("touchend", onEnd);
