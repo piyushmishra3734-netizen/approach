@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Maximize, Menu, Minimize, RotateCw } from "lucide-react";
+import { Maximize, Menu, Minimize, RotateCw, Settings } from "lucide-react";
 import { CITIES, CITY_ORDER, type CityId } from "@/game/cities";
 import type { HudSnapshot, SimHandle, Vehicle } from "@/game/sim";
 
@@ -132,6 +132,7 @@ export function FlightApp() {
   const [cityId, setCityId] = useState<CityId>("sf");
   const [vehicle, setVehicle] = useState<Vehicle>("plane");
   const [hintVisible, setHintVisible] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [touchUi, setTouchUi] = useState(false);
   const [simReady, setSimReady] = useState(false);
   const [bootError, setBootError] = useState(false);
@@ -388,7 +389,10 @@ export function FlightApp() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "Escape") {
-        if (menu) return;
+        if (menu) {
+          setSettingsOpen(false);
+          return;
+        }
         setPaused((p) => {
           const next = !p;
           simRef.current?.setFlying(!next);
@@ -397,6 +401,10 @@ export function FlightApp() {
         });
       }
       if (menu && (e.code === "Enter" || e.code === "Space")) {
+        // Enter anywhere in the menu starts the game — except on a control,
+        // which gets to be a control. Without this, opening Settings or picking
+        // a city from the keyboard also took off.
+        if (document.activeElement instanceof HTMLButtonElement) return;
         e.preventDefault();
         begin();
       }
@@ -676,43 +684,64 @@ export function FlightApp() {
               ))}
             </div>
 
-            <div className="rise rise-6 flex flex-col gap-2">
-              <div className="flex items-center gap-4">
-                <span className="font-mono text-xs tracking-label text-muted uppercase">Assets</span>
-                <div
-                  className="flex gap-1 rounded-md border border-line p-1"
-                  role="group"
-                  aria-label="Asset quality"
-                >
-                  {(["low", "high"] as AssetTier[]).map((tier) => (
-                    <button
-                      key={tier}
-                      type="button"
-                      onClick={() => chooseAssets(tier)}
-                      aria-pressed={assets === tier}
-                      className={`btn-press h-8 rounded px-4 font-mono text-xs tracking-hud uppercase ${
-                        assets === tier ? "bg-accent text-bg" : "text-dim hover:text-fg"
-                      }`}
-                    >
-                      {tier}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <p
-                className="max-w-sm font-mono text-xs leading-relaxed tracking-hud text-dim"
-                aria-live="polite"
+            <div className="rise rise-6 flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((open) => !open)}
+                aria-expanded={settingsOpen}
+                aria-controls="menu-settings"
+                className={`btn-press flex h-11 w-fit items-center gap-2 font-mono text-sm tracking-hud ${
+                  settingsOpen ? "text-fg" : "text-dim hover:text-muted"
+                }`}
               >
-                {assets === "low"
-                  ? "Low · nothing beyond the city tiles, and no sound."
-                  : packState === "failed"
-                    ? "Sound pack failed — press High again to retry."
-                    : packState === "downloading"
-                      ? `Sound pack · ${kb(packBytes.received)} / ${
-                          packBytes.total ? kb(packBytes.total) : AUDIO_PACK_KB
-                        } KB`
-                      : `High · engine sound for the plane and the car (${AUDIO_PACK_KB} KB).`}
-              </p>
+                <Settings className="size-4" strokeWidth={1.75} aria-hidden="true" />
+                Settings
+              </button>
+
+              <div
+                id="menu-settings"
+                hidden={!settingsOpen}
+                className="flex flex-col gap-2 border-l border-line pl-4"
+              >
+                <div className="flex items-center gap-4">
+                  <span className="font-mono text-xs tracking-label text-muted uppercase">
+                    Assets
+                  </span>
+                  <div
+                    className="flex gap-1 rounded-md border border-line p-1"
+                    role="group"
+                    aria-label="Asset quality"
+                  >
+                    {(["low", "high"] as AssetTier[]).map((tier) => (
+                      <button
+                        key={tier}
+                        type="button"
+                        onClick={() => chooseAssets(tier)}
+                        aria-pressed={assets === tier}
+                        className={`btn-press h-8 rounded px-4 font-mono text-xs tracking-hud uppercase ${
+                          assets === tier ? "bg-accent text-bg" : "text-dim hover:text-fg"
+                        }`}
+                      >
+                        {tier}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p
+                  className="max-w-sm font-mono text-xs leading-relaxed tracking-hud text-dim"
+                  aria-live="polite"
+                >
+                  {assets === "low"
+                    ? "Low · nothing beyond the city tiles, and no sound."
+                    : packState === "failed"
+                      ? "Sound pack failed — press High again to retry."
+                      : packState === "downloading"
+                        ? `Sound pack · ${kb(packBytes.received)} / ${
+                            packBytes.total ? kb(packBytes.total) : AUDIO_PACK_KB
+                          } KB`
+                        : `High · engine sound for the plane and the car (${AUDIO_PACK_KB} KB).`}
+                </p>
+              </div>
             </div>
           </div>
         </div>
