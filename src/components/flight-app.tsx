@@ -46,6 +46,43 @@ type AssetTier = "low" | "high";
 /** Rounded size of the sound pack, for the label before the fetch reports one. */
 const AUDIO_PACK_KB = 110;
 
+/** How far the menu has to be dragged down before a release reloads, px. */
+const PULL_TRIGGER = 96;
+/** Where the indicator stops following the finger, px. */
+const PULL_MAX = 150;
+
+/**
+ * What Ctrl+Shift+R does, for a phone that has no Ctrl.
+ *
+ * A plain `location.reload()` is not enough on a device that has installed the
+ * app: a service worker will happily serve the same stale shell back. So the
+ * worker and its caches go first, and the reload carries a one-shot query so
+ * the document itself cannot come from the HTTP cache either. The parameter is
+ * stripped from the address bar once the new page is up.
+ */
+async function hardReload() {
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((reg) => reg.unregister()));
+    }
+  } catch {
+    /* unavailable, or blocked in private mode — the reload still helps */
+  }
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    }
+  } catch {
+    /* same */
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("r", Date.now().toString(36));
+  // `replace`, not `assign`: a reload is not a place in the history.
+  window.location.replace(url.toString());
+}
+
 function mb(bytes: number) {
   return (bytes / 1048576).toFixed(1);
 }
@@ -133,6 +170,8 @@ export function FlightApp() {
   const [vehicle, setVehicle] = useState<Vehicle>("plane");
   const [hintVisible, setHintVisible] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** How far the reload gesture has been dragged, px. 0 when not dragging. */
+  const [pull, setPull] = useState(0);
   const [touchUi, setTouchUi] = useState(false);
   const [simReady, setSimReady] = useState(false);
   const [bootError, setBootError] = useState(false);
@@ -168,6 +207,66 @@ export function FlightApp() {
       /* private mode */
     }
   }, [cityId, vehicle, assets]);
+
+  useEffect(() => {
+    // Tidy the address bar after a pull-to-reload.
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("r")) return;
+    url.searchParams.delete("r");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+
+  /**
+   * Pull down to reload, on the menu and the pause card only.
+   *
+   * The browser's own pull-to-refresh is off for the whole document on
+   * purpose — `touch-action: none` is what stops a downward drag on the flight
+   * stick from reloading the game mid-air. That leaves a phone with no way to
+   * refresh at all, so the gesture is given back exactly where it is safe.
+   */
+  useEffect(() => {
+    if (!(menu || paused)) return;
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+    let distance = 0;
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      tracking = true;
+      distance = 0;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!tracking || e.touches.length !== 1) return;
+      const dy = e.touches[0].clientY - startY;
+      const dx = Math.abs(e.touches[0].clientX - startX);
+      // Downward, and more down than sideways — a horizontal swipe is not this.
+      distance = dy > 0 && dx < dy ? Math.min(dy, PULL_MAX) : 0;
+      setPull(distance);
+    };
+    const onEnd = () => {
+      if (!tracking) return;
+      tracking = false;
+      const reached = distance >= PULL_TRIGGER;
+      distance = 0;
+      setPull(0);
+      if (reached) void hardReload();
+    };
+
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onEnd, { passive: true });
+    window.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      setPull(0);
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
+    };
+  }, [menu, paused]);
 
   useEffect(() => {
     const coarse = window.matchMedia("(pointer: coarse)");
@@ -537,6 +636,27 @@ export function FlightApp() {
         aria-label="Flight viewport"
       />
 
+      {pull > 0 ? (
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0 z-50 flex justify-center pt-safe-t"
+          style={{
+            // Follows the finger at half speed, the way a rubber band does.
+            transform: `translateY(${pull * 0.5}px)`,
+            opacity: Math.min(1, pull / PULL_TRIGGER),
+          }}
+          aria-hidden="true"
+        >
+          <div className="mt-3 flex items-center gap-2 rounded-full border border-line bg-bg/85 px-4 py-2 font-mono text-xs tracking-hud text-fg">
+            <RotateCw
+              className="size-4"
+              strokeWidth={1.75}
+              style={{ rotate: `${pull * 2.4}deg` }}
+            />
+            {pull >= PULL_TRIGGER ? "Release to reload" : "Pull to reload"}
+          </div>
+        </div>
+      ) : null}
+
       <div
         className={`load-rail ${streaming ? "is-on" : ""} ${waitRail ? "is-wait" : ""}`}
         role="progressbar"
@@ -770,7 +890,7 @@ export function FlightApp() {
             </p>
             <button
               type="button"
-              onClick={() => window.location.reload()}
+              onClick={() => void hardReload()}
               aria-label="Reload the page"
               className="btn-press pointer-events-auto flex size-11 items-center justify-center rounded-md text-fg/80 hover:text-fg"
             >
