@@ -35,6 +35,7 @@ const CITY_KEY = "approach.city";
 const VEHICLE_KEY = "approach.vehicle";
 const ASSETS_KEY = "approach.assets";
 const QUALITY_KEY = "approach.quality";
+const SPEED_KEY = "approach.speed";
 
 /**
  * How much the game is allowed to download beyond the city tiles.
@@ -151,6 +152,16 @@ function readStoredQuality(): QualityLevel {
   return "medium";
 }
 
+function readStoredSpeed(): number {
+  try {
+    const v = Number(localStorage.getItem(SPEED_KEY));
+    if (Number.isFinite(v) && v >= 0.4 && v <= 3) return v;
+  } catch {
+    /* private mode */
+  }
+  return 1;
+}
+
 function loadLabel(simReady: boolean, hud: HudSnapshot, progress: number, bootError: boolean) {
   if (bootError) return "Unavailable";
   if (!simReady) return "Loading engine";
@@ -171,6 +182,7 @@ export function FlightApp() {
   const vehicleRef = useRef<Vehicle>("plane");
   const assetsRef = useRef<AssetTier>("low");
   const qualityRef = useRef<QualityLevel>("medium");
+  const speedRef = useRef(1);
   const pendingStart = useRef(false);
   /** Latest `hud.worldReady`, so the start gate does not re-bind the key handler. */
   const worldReadyRef = useRef(false);
@@ -196,12 +208,14 @@ export function FlightApp() {
   const [carBytes, setCarBytes] = useState({ received: 0, total: 0 });
   const [assets, setAssets] = useState<AssetTier>("low");
   const [quality, setQuality] = useState<QualityLevel>("medium");
+  const [speedScale, setSpeedScale] = useState(1);
   const [packState, setPackState] = useState<"idle" | "downloading" | "ready" | "failed">("idle");
   const [packBytes, setPackBytes] = useState({ received: 0, total: 0 });
   cityRef.current = cityId;
   vehicleRef.current = vehicle;
   assetsRef.current = assets;
   qualityRef.current = quality;
+  speedRef.current = speedScale;
   worldReadyRef.current = hud.worldReady;
 
   useEffect(() => {
@@ -213,6 +227,8 @@ export function FlightApp() {
     if (storedAssets !== assetsRef.current) setAssets(storedAssets);
     const storedQuality = readStoredQuality();
     if (storedQuality !== qualityRef.current) setQuality(storedQuality);
+    const storedSpeed = readStoredSpeed();
+    if (storedSpeed !== speedRef.current) setSpeedScale(storedSpeed);
   }, []);
 
   useEffect(() => {
@@ -221,10 +237,11 @@ export function FlightApp() {
       localStorage.setItem(VEHICLE_KEY, vehicle);
       localStorage.setItem(ASSETS_KEY, assets);
       localStorage.setItem(QUALITY_KEY, quality);
+      localStorage.setItem(SPEED_KEY, String(speedScale));
     } catch {
       /* private mode */
     }
-  }, [cityId, vehicle, assets, quality]);
+  }, [cityId, vehicle, assets, quality, speedScale]);
 
   useEffect(() => {
     // Tidy the address bar after a pull-to-reload.
@@ -339,6 +356,7 @@ export function FlightApp() {
             assetsRef.current === "high",
             qualityRef.current,
           );
+          handle.setSpeedScale(speedRef.current);
         } catch {
           setBootError(true);
           return;
@@ -444,6 +462,14 @@ export function FlightApp() {
     setQuality(next);
     qualityRef.current = next;
     simRef.current?.setQuality(next);
+  }, []);
+
+  /** Walk pace multiplier, from the presets or the custom slider. */
+  const chooseSpeed = useCallback((next: number) => {
+    const v = Math.min(3, Math.max(0.4, next));
+    setSpeedScale(v);
+    speedRef.current = v;
+    simRef.current?.setSpeedScale(v);
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -675,10 +701,9 @@ export function FlightApp() {
   const endLook = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (lookDrag.current.id !== e.pointerId) return;
     lookDrag.current.id = -1;
-    // Hand the view back: zeros plus inactive lets the sim's own easing carry
-    // it home instead of leaving the camera parked where the finger stopped.
-    lookValue.current = { yaw: 0, pitch: 0 };
-    simRef.current?.setLook({ yaw: 0, pitch: 0, active: false });
+    // Deliberately no re-centre: the view stays where the player left it
+    // until they drag again (or restart, which resets the offset).
+    simRef.current?.setLook({ active: false });
   }, []);
 
   const city = CITIES[cityId];
@@ -1005,6 +1030,57 @@ export function FlightApp() {
                     engine: {hud.quality}
                   </p>
                 ) : null}
+                <div className="flex items-center gap-4">
+                  <span className="font-mono text-xs tracking-label text-muted uppercase">
+                    Speed
+                  </span>
+                  <div
+                    className="flex gap-1 rounded-md border border-line p-1"
+                    role="group"
+                    aria-label="Walk speed"
+                  >
+                    {(
+                      [
+                        ["Slow", 0.7],
+                        ["Normal", 1],
+                        ["Fast", 1.4],
+                        ["Turbo", 2],
+                      ] as Array<[string, number]>
+                    ).map(([label, value]) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => chooseSpeed(value)}
+                        aria-pressed={Math.abs(speedScale - value) < 0.001}
+                        className={`btn-press h-8 rounded px-4 font-mono text-xs tracking-hud uppercase ${
+                          Math.abs(speedScale - value) < 0.001
+                            ? "bg-accent text-bg"
+                            : "text-dim hover:text-fg"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-xs tracking-label text-muted uppercase">
+                    Custom
+                  </span>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={2.5}
+                    step={0.05}
+                    value={speedScale}
+                    onChange={(e) => chooseSpeed(Number(e.target.value))}
+                    aria-label="Custom walk speed"
+                    className="h-8 w-44 accent-current"
+                  />
+                  <span className="w-14 font-mono text-xs tabular-nums text-muted">
+                    {speedScale.toFixed(2)}×
+                  </span>
+                </div>
                 <div className="flex items-center gap-4">
                   <span className="font-mono text-xs tracking-label text-muted uppercase">
                     Assets

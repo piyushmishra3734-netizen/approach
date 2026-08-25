@@ -287,6 +287,11 @@ export type SimHandle = {
   /** Walk only: jump, for the touch button that has no Space bar. */
   jump: () => void;
   /**
+   * Walk only: multiplier on her walk/run/backpedal speeds, from the menu's
+   * speed setting. 1 is the authored pace.
+   */
+  setSpeedScale: (scale: number) => void;
+  /**
    * Walk only: drag-look offsets in radians off the heading, and whether a
    * drag is live. The camera springs home when `active` goes false.
    */
@@ -417,6 +422,8 @@ export function createSim(
   let idleTime = 0;
   let landmarkClock = 14;
   let blockedWas = false;
+  /** Walk speed multiplier from the menu's speed setting; 1 is authored pace. */
+  let speedScale = 1;
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -891,12 +898,12 @@ export function createSim(
 
     pose.heading = wrapPi(pose.heading + turnInput * WALK_TURN_RATE * dt);
 
-    const top = running ? WALK_RUN_SPEED : WALK_SPEED;
+    const top = (running ? WALK_RUN_SPEED : WALK_SPEED) * speedScale;
     const target =
       driveInput > 0.02
         ? driveInput * top
         : driveInput < -0.02
-          ? driveInput * WALK_BACK_SPEED
+          ? driveInput * WALK_BACK_SPEED * speedScale
           : 0;
     pose.speed += (target - pose.speed) * Math.min(1, WALK_ACCEL * dt);
     if (Math.abs(pose.speed) < 0.02) pose.speed = 0;
@@ -1385,12 +1392,6 @@ export function createSim(
 
     integrate(dt);
     applyPoseToCraft();
-    // An ended drag springs the camera back to the walking line.
-    if (!look.active) {
-      const k = 1 - Math.exp(-4.2 * dt);
-      look.yaw -= look.yaw * k;
-      look.pitch -= look.pitch * k;
-    }
     placeCamera(dt);
     if (vehicle === "walk") {
       // The gait is driven by the ground speed, not by the key held: blocked
@@ -1521,6 +1522,9 @@ export function createSim(
     },
     jump: () => {
       touchJump = true;
+    },
+    setSpeedScale: (scale) => {
+      speedScale = clamp(scale, 0.4, 3);
     },
     setLook: (partial) => {
       if (partial.active != null) look.active = partial.active;

@@ -48,43 +48,25 @@ export type CharacterSpec = {
    */
   boneMap?: Record<string, string>;
   /**
-   * Drive this rig's LEFT arm from the clip's RIGHT arm and vice versa.
+   * Pose the arms procedurally instead of trusting borrowed arm tracks.
    *
-   * Her export names the arm bones against the visual mesh — the bone called
-   * `L-UpperArm` hangs off the character's right shoulder — so a name-to-name
-   * retarget swings each hand across the body and reads as the arms trading
-   * places every stride.
-   *
-   * The swap happens on the finished tracks rather than in the bone map: the
-   * map drives the source lookup, and this rig has already shown it cannot be
-   * trusted to resolve those names the obvious way (swapping there left the
-   * arms stranded in T-pose). Exchanging the baked values cannot miss — every
-   * track here was found by the same pass that animated the legs.
+   * Her exported arm bones have now failed three ways against retargeted
+   * Mixamo data: name-to-name swung each hand across the body, swapping the
+   * map's sources left them stranded in T-pose, and swapping baked tracks
+   * crossed them again — the rig simply cannot be reasoned about blind. So
+   * the walk/run/jump clips lose their arm tracks entirely, and the arms are
+   * posed here in world space: dropped from the T-pose bind to her sides,
+   * swung by the stride as one rigid chain. The idle clip keeps its own arms
+   * and takes them back whenever she stands.
    */
-  swapArms?: boolean;
+  proceduralArms?: boolean;
 };
 
-/**
- * Exchange the quaternion values of every left/right arm pair in a finished
- * clip. All tracks were baked over one shared sample grid, so any left track
- * and its right twin carry identical timing and length — the arrays trade
- * whole. Clavicles through hands; the spine and legs are untouched.
- */
-function swapArmTracks(clip: THREE.AnimationClip): THREE.AnimationClip {
-  const isArmTrack = (name: string) =>
-    /\.bones\[/.test(name) && /(Clavicle|UpperArm|Forearm|Hand)/i.test(name);
-  const canonical = (name: string) => name.replace(/-(?:L|R)-/, "-SIDE-");
-  for (const left of clip.tracks) {
-    if (!/-L-/.test(left.name) || !isArmTrack(left.name)) continue;
-    const right = clip.tracks.find(
-      (t) => /-R-/.test(t.name) && isArmTrack(t.name) && canonical(t.name) === canonical(left.name),
-    );
-    if (!right) continue;
-    const values = left.values;
-    left.values = right.values;
-    right.values = values;
-  }
-  return clip;
+/** Remove every arm track from a clip; the procedural layer owns them. */
+function stripArmTracks(clip: THREE.AnimationClip): void {
+  clip.tracks = clip.tracks.filter(
+    (t) => !(/\.bones\[/.test(t.name) && /(Clavicle|UpperArm|Forearm|Hand)/i.test(t.name)),
+  );
 }
 
 /**
@@ -144,9 +126,9 @@ export const LACRIMOSA: CharacterSpec = {
     jump: "models/anim-jump.fbx",
   },
   boneMap: BIPED_FROM_MIXAMO,
-  // Her export names the arms against the mesh, so name-to-name retargeting
-  // swung each hand across the body. See `swapArms`.
-  swapArms: true,
+  // Her arm bones have defeated every data-driven retarget; see the note on
+  // `proceduralArms`.
+  proceduralArms: true,
 };
 
 export type Walker = {
@@ -383,8 +365,8 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
     for (const gait of ["idle", "walk", "run", "jump"] as Gait[]) {
       const url = spec.borrow[gait];
       if (!url) continue;
-      let borrowed = await borrowClip(base + url, skinned, spec.boneMap, gait);
-      if (borrowed && spec.swapArms) borrowed = swapArmTracks(borrowed);
+      const borrowed = await borrowClip(base + url, skinned, spec.boneMap, gait);
+      if (borrowed && spec.proceduralArms && gait !== "idle") stripArmTracks(borrowed);
       if (borrowed) clips[gait] = borrowed;
     }
   }
@@ -406,6 +388,87 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
     jump.clampWhenFinished = true;
   }
   if (idle) idle.setEffectiveWeight(1);
+
+  /*
+   * The procedural arm rig: both sides' upper arm, forearm and hand, captured
+   * at their bind pose before any action has touched them. Posed as one rigid
+   * chain in world space — see the note on `proceduralArms`.
+   */
+  let rig: { bones: THREE.Bone[]; rest: THREE.Quaternion[]; influence: number } | null = null;
+  if (spec.proceduralArms && skinned) {
+    const find = (stem: string) =>
+      skinned.skeleton.bones.find((b) => b.name === stem || b.name.startsWith(`${stem}_`));
+    const stems = [
+      "Bip001-L-UpperArm",
+      "Bip001-R-UpperArm",
+      "Bip001-L-Forearm",
+      "Bip001-R-Forearm",
+      "Bip001-L-Hand",
+      "Bip001-R-Hand",
+    ];
+    const bones = stems.map(find);
+    if (bones.every(Boolean)) {
+      rig = {
+        bones: bones as THREE.Bone[],
+        rest: (bones as THREE.Bone[]).map((b) => b.quaternion.clone()),
+        influence: 0,
+      };
+    } else {
+      console.warn("[walker] procedural arms: arm bones not found on this rig");
+    }
+  }
+
+  /** Stride clock for the swing, radians; one full turn is two steps. */
+  let gaitPhase = Math.random() * Math.PI * 2;
+  const tmpParentWorld = new THREE.Quaternion();
+  const tmpInv = new THREE.Quaternion();
+  const tmpSwing = new THREE.Quaternion();
+  const tmpDrop = new THREE.Quaternion();
+  const sideAxis = new THREE.Vector3();
+  const fwdAxis = new THREE.Vector3();
+
+  /** Called after the mixer pass; owns the arms whenever she is moving. */
+  function poseProceduralArms(dt: number, pace: number, airborne: boolean) {
+    if (!rig) return;
+    // Ease the takeover so idle-to-walk does not snap her arms down, and let
+    // the idle clip own them entirely once she stands.
+    rig.influence += ((moving ? 1 : 0) - rig.influence) * (1 - Math.exp(-dt / BLEND));
+    const idleW = idle?.getEffectiveWeight() ?? 1;
+    const influence = rig.influence * clamp(1 - idleW, 0, 1);
+    if (influence < 0.01) return;
+
+    const runShare = weight.run / Math.max(weight.walk + weight.run, 1e-4);
+    // Metres per full arm cycle: shorter when running.
+    const cycle = 1.55 - 0.5 * runShare;
+    if (pace > 0.05 && !airborne) gaitPhase += (pace / cycle) * Math.PI * 2 * dt;
+    const swing = Math.sin(gaitPhase);
+
+    // Arms hang closer to the body and pump harder at a run; a jump throws
+    // them out and up.
+    const amp = (airborne ? 0.25 : 0.45 + 0.3 * runShare) * influence;
+    const drop = (airborne ? 1.05 : 1.32 - 0.15 * runShare) * influence;
+
+    sideAxis.set(1, 0, 0).applyQuaternion(group.quaternion); // her left
+    fwdAxis.set(0, 0, 1).applyQuaternion(group.quaternion); // her forward
+
+    for (let i = 0; i < rig.bones.length; i++) {
+      const bone = rig.bones[i];
+      const isLeft = i % 2 === 0;
+      // Anti-phase hands, each dropped off the T-pose toward her side.
+      const s = (isLeft ? -swing : swing) * amp;
+      const lowerAngle = isLeft ? -drop : drop;
+      tmpSwing.setFromAxisAngle(sideAxis, s);
+      tmpDrop.setFromAxisAngle(fwdAxis, lowerAngle);
+      tmpSwing.multiply(tmpDrop);
+      bone.parent!.getWorldQuaternion(tmpParentWorld);
+      tmpInv.copy(tmpParentWorld).invert();
+      bone.quaternion
+        .copy(tmpInv)
+        .multiply(tmpSwing)
+        .multiply(tmpParentWorld)
+        .multiply(rig.rest[i]);
+    }
+  }
 
   /** Current blend weights, eased toward the target so gait changes glide. */
   const weight = { idle: 1, walk: 0, run: 0, jump: 0 };
@@ -459,6 +522,8 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
       run.timeScale = direction * clamp(pace / RUN_REFERENCE, STRIDE_RANGE.min, STRIDE_RANGE.max);
     }
     mixer.update(dt);
+    // Her arms ride on top of whatever the clips did to the rest of her.
+    poseProceduralArms(dt, pace, airborne);
   }
 
   return {
