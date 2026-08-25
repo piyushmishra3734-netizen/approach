@@ -94,9 +94,11 @@ export function createCompanion(): Companion | null {
     // An English voice first; among them, the ones that read as feminine on
     // the platforms people actually use. Any English voice beats silence.
     const en = voices.filter((v) => v.lang.toLowerCase().startsWith("en"));
+    // "Natural" is the neural tier Windows exposes where available; it sounds
+    // categorically better than the legacy SAPI set.
     voice =
+      en.find((v) => /natural/i.test(v.name)) ??
       en.find((v) => /female|zira|aria|jenny|samantha|karen|serena|google uk english female/i.test(v.name)) ??
-      en.find((v) => /zira|aria|jenny|female/i.test(v.name)) ??
       en[0] ??
       voices[0];
   };
@@ -120,9 +122,11 @@ export function createCompanion(): Companion | null {
       synth.cancel();
       const utter = new SpeechSynthesisUtterance(line);
       utter.voice = voice;
-      utter.rate = 1.04;
-      utter.pitch = 1.25;
-      utter.volume = 0.85;
+      // A touch slower and barely pitched-up reads warmer than the default
+      // chipmunk setting; cranking pitch is what makes TTS shriek.
+      utter.rate = 0.97;
+      utter.pitch = 1.12;
+      utter.volume = 0.95;
       synth.speak(utter);
       return true;
     },

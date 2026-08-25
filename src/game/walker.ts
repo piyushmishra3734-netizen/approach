@@ -50,32 +50,41 @@ export type CharacterSpec = {
   /**
    * Drive this rig's LEFT arm from the clip's RIGHT arm and vice versa.
    *
-   * Some Biped exports name the arm bones against the visual mesh — the bone
-   * called `L-UpperArm` hangs off the character's right shoulder. Retargeting
-   * name-to-name then swings each hand across the body, which reads as the
-   * arms trading places every stride. Flipping the four pairs fixes it at the
-   * source; legs are left alone because a phase-flipped leg pair is almost
-   * invisible next to a flipped arm pair.
+   * Her export names the arm bones against the visual mesh — the bone called
+   * `L-UpperArm` hangs off the character's right shoulder — so a name-to-name
+   * retarget swings each hand across the body and reads as the arms trading
+   * places every stride.
+   *
+   * The swap happens on the finished tracks rather than in the bone map: the
+   * map drives the source lookup, and this rig has already shown it cannot be
+   * trusted to resolve those names the obvious way (swapping there left the
+   * arms stranded in T-pose). Exchanging the baked values cannot miss — every
+   * track here was found by the same pass that animated the legs.
    */
   swapArms?: boolean;
 };
 
-const ARM_SWAP_PAIRS: Array<[string, string]> = [
-  ["Bip001-L-Clavicle", "Bip001-R-Clavicle"],
-  ["Bip001-L-UpperArm", "Bip001-R-UpperArm"],
-  ["Bip001-L-Forearm", "Bip001-R-Forearm"],
-  ["Bip001-L-Hand", "Bip001-R-Hand"],
-];
-
-/** The map with the arm pairs' sources exchanged, when a rig needs it. */
-function withSwappedArms(map: Record<string, string>, swap?: boolean): Record<string, string> {
-  if (!swap) return map;
-  const out = { ...map };
-  for (const [left, right] of ARM_SWAP_PAIRS) {
-    out[left] = map[right];
-    out[right] = map[left];
+/**
+ * Exchange the quaternion values of every left/right arm pair in a finished
+ * clip. All tracks were baked over one shared sample grid, so any left track
+ * and its right twin carry identical timing and length — the arrays trade
+ * whole. Clavicles through hands; the spine and legs are untouched.
+ */
+function swapArmTracks(clip: THREE.AnimationClip): THREE.AnimationClip {
+  const isArmTrack = (name: string) =>
+    /\.bones\[/.test(name) && /(Clavicle|UpperArm|Forearm|Hand)/i.test(name);
+  const canonical = (name: string) => name.replace(/-(?:L|R)-/, "-SIDE-");
+  for (const left of clip.tracks) {
+    if (!/-L-/.test(left.name) || !isArmTrack(left.name)) continue;
+    const right = clip.tracks.find(
+      (t) => /-R-/.test(t.name) && isArmTrack(t.name) && canonical(t.name) === canonical(left.name),
+    );
+    if (!right) continue;
+    const values = left.values;
+    left.values = right.values;
+    right.values = values;
   }
-  return out;
+  return clip;
 }
 
 /**
@@ -371,11 +380,11 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
     if (own) clips[gait] = own;
   }
   if (skinned && spec.borrow && spec.boneMap) {
-    const map = withSwappedArms(spec.boneMap, spec.swapArms);
     for (const gait of ["idle", "walk", "run", "jump"] as Gait[]) {
       const url = spec.borrow[gait];
       if (!url) continue;
-      const borrowed = await borrowClip(base + url, skinned, map, gait);
+      let borrowed = await borrowClip(base + url, skinned, spec.boneMap, gait);
+      if (borrowed && spec.swapArms) borrowed = swapArmTracks(borrowed);
       if (borrowed) clips[gait] = borrowed;
     }
   }

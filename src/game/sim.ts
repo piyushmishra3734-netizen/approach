@@ -988,9 +988,10 @@ export function createSim(
       return;
     }
     // Standing still, the settle chase fights centimetre-scale probe noise on
-    // raw photogrammetry and the character shivers in place. A small dead-band
-    // holds the pose; anything a real step would climb still gets through.
-    if (Math.abs(pose.speed) < 0.05 && Math.abs(restY - pose.y) < 0.06) {
+    // raw photogrammetry and the character shivers in place. While parked,
+    // hold the pose outright — only a genuine re-grade of the tile under her
+    // (tens of centimetres) is worth snapping for.
+    if (Math.abs(pose.speed) < 0.05 && Math.abs(restY - pose.y) < 0.25) {
       lastRestY = restY;
       return;
     }

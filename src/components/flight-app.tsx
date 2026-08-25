@@ -665,7 +665,9 @@ export function FlightApp() {
     lookDrag.current.x = e.clientX;
     lookDrag.current.y = e.clientY;
     const next = lookValue.current;
-    next.yaw += dx * 0.0052;
+    // Screen-right must pan the view right; this axis reads inverted against
+    // the camera orbit, hence the minus.
+    next.yaw -= dx * 0.0052;
     next.pitch -= dy * 0.0038;
     simRef.current?.setLook({ ...next, active: true });
   }, []);
