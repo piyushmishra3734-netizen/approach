@@ -634,6 +634,51 @@ export function FlightApp() {
     simRef.current?.setTouch({ throttle: on ? (dir === "thrust" ? 1 : -1) : 0 });
   }, []);
 
+  /**
+   * Drag-look, on foot: a finger or the mouse anywhere on the world turns the
+   * camera while the body keeps walking its own line. The stick and buttons
+   * stopPropagation on their own presses, so only empty screen reaches here.
+   */
+  const lookDrag = useRef({ id: -1, x: 0, y: 0 });
+  const lookValue = useRef({ yaw: 0, pitch: 0 });
+
+  const onLookDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!hud.flying || vehicleRef.current !== "walk") return;
+      // A tap meant for an overlay control must not grab the camera.
+      if ((e.target as HTMLElement).closest("button,[role='application'],a")) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      lookDrag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* some synthetic events cannot capture */
+      }
+    },
+    [hud.flying],
+  );
+
+  const onLookMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (lookDrag.current.id !== e.pointerId) return;
+    const dx = e.clientX - lookDrag.current.x;
+    const dy = e.clientY - lookDrag.current.y;
+    lookDrag.current.x = e.clientX;
+    lookDrag.current.y = e.clientY;
+    const next = lookValue.current;
+    next.yaw += dx * 0.0052;
+    next.pitch -= dy * 0.0038;
+    simRef.current?.setLook({ ...next, active: true });
+  }, []);
+
+  const endLook = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (lookDrag.current.id !== e.pointerId) return;
+    lookDrag.current.id = -1;
+    // Hand the view back: zeros plus inactive lets the sim's own easing carry
+    // it home instead of leaving the camera parked where the finger stopped.
+    lookValue.current = { yaw: 0, pitch: 0 };
+    simRef.current?.setLook({ yaw: 0, pitch: 0, active: false });
+  }, []);
+
   const city = CITIES[cityId];
   const isCar = vehicle === "car";
   const isWalk = vehicle === "walk";
@@ -644,12 +689,12 @@ export function FlightApp() {
     : 0;
   const controlHint = touchUi
     ? isWalk
-      ? "Stick to walk and turn · Hold Run · Jump button · Eye for first person"
+      ? "Stick to walk and turn · Hold Run · Jump button · Drag to look around · Eye for first person"
       : isCar
         ? "Stick to steer · Throttle and brake on the right · Eye button for the driver's seat"
         : "Left stick to bank and pitch · Throttle and brake on the right"
     : isWalk
-      ? "W/S walk · A/D turn · Shift run · Space jump · V view · R reset · Esc pause"
+      ? "W/S walk · A/D turn · Shift run · Space jump · Drag mouse to look · V view · R reset · Esc pause"
       : isCar
         ? "W/S throttle and brake · A/D steer · V chase / driver's seat · R reset · Esc pause"
         : "W/S pitch · A/D roll · Q/E yaw · Shift throttle · V view · Esc pause";
@@ -697,6 +742,10 @@ export function FlightApp() {
         tabIndex={0}
         className="absolute inset-0 touch-none outline-none"
         aria-label="Flight viewport"
+        onPointerDown={onLookDown}
+        onPointerMove={onLookMove}
+        onPointerUp={endLook}
+        onPointerCancel={endLook}
       />
 
       {pull > 0 ? (

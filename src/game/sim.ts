@@ -15,6 +15,8 @@ import { loadCar, PAGANI_RIG, WHEEL_IDS, type CarModel } from "./car";
 import { loadWalker, LACRIMOSA, type Walker } from "./walker";
 import { createInput, type InputHandle } from "./input";
 import { createEngineAudio, type EngineAudio } from "./audio";
+import { createFootsteps, type Footsteps } from "./footsteps";
+import { createCompanion, type Companion } from "./companion";
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
@@ -284,6 +286,11 @@ export type SimHandle = {
   setSound: (on: boolean) => void;
   /** Walk only: jump, for the touch button that has no Space bar. */
   jump: () => void;
+  /**
+   * Walk only: drag-look offsets in radians off the heading, and whether a
+   * drag is live. The camera springs home when `active` goes false.
+   */
+  setLook: (partial: Partial<{ yaw: number; pitch: number; active: boolean }>) => void;
   /** Switch render quality mid-session; applies from the next refinement pass. */
   setQuality: (q: QualityLevel) => void;
   setTouch: (partial: Partial<{ pitch: number; roll: number; yaw: number; throttle: number }>) => void;
@@ -401,6 +408,15 @@ export function createSim(
   let audioLoading = false;
   /** Live render quality; the tile settings below chase it. */
   let qualityLevel = QUALITY[quality] ? quality : "medium";
+  let footsteps: Footsteps | null = null;
+  let companion: Companion | null = null;
+  /** Distance since the last footfall, in metres, and which foot is next. */
+  let stepDistance = 0;
+  /** Reaction timers for the companion, in seconds. */
+  let runTime = 0;
+  let idleTime = 0;
+  let landmarkClock = 14;
+  let blockedWas = false;
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -515,8 +531,17 @@ export function createSim(
    * Screen-space error the tile refinement chases, in pixels — lower is
    * sharper and heavier. The tier is user-selectable in the settings panel
    * and lands through `applyQuality` below; these are just the boot values.
+   *
+   * On foot the camera sits a metre off the pavement, where tile coarseness
+   * shows worst, so walking sharpens whichever tier is active by a factor —
+   * ground-level realism lives or dies on this more than anything else.
    */
-  tiles.errorTarget = QUALITY[qualityLevel].errorTarget;
+  const tierErrorTarget = (level: QualityLevel) => {
+    const base = QUALITY[level].errorTarget;
+    if (vehicle !== "walk") return base;
+    return Math.max(2.6, Math.round(base * 0.72 * 100) / 100);
+  };
+  tiles.errorTarget = tierErrorTarget(qualityLevel);
   tiles.lruCache.maxBytesSize = QUALITY[qualityLevel].maxCache;
   tiles.lruCache.minBytesSize = QUALITY[qualityLevel].minCache;
   scene.add(tiles.group);
@@ -591,6 +616,12 @@ export function createSim(
   let camInitialized = false;
   /** Smoothed frames-per-second, for the debug probe and QA runs. */
   let fps = 0;
+  /**
+   * Where a drag has taken the camera, radians off the heading, while the
+   * body keeps walking its own line. Pitch tilts the view; both spring home
+   * when the drag ends.
+   */
+  const look = { yaw: 0, pitch: 0, active: false };
 
   /** The object the camera follows: the car once it is loaded, else the plane. */
   /** The lat/lon the tileset is centred on, which differs per vehicle. */
@@ -625,9 +656,10 @@ export function createSim(
           .applyQuaternion(obj.quaternion)
           .add(obj.position);
       } else {
-        // Over the shoulder, on heading only — a walker's body does not bank,
-        // and the ground under it is too lumpy to inherit pitch from.
-        followEuler.set(0, pose.heading, 0);
+        // Over the shoulder, on heading plus wherever the player has dragged
+        // the view — a walker's body does not bank, and the ground under it is
+        // too lumpy to inherit pitch from, so the drag rides this euler alone.
+        followEuler.set(-look.pitch, pose.heading + look.yaw, 0);
         followQuat.setFromEuler(followEuler);
         tmpCam.copy(WALK_CHASE_OFFSET).applyQuaternion(followQuat).add(obj.position);
         tmpLook.copy(WALK_CHASE_LOOK).applyQuaternion(followQuat).add(obj.position);
@@ -678,6 +710,13 @@ export function createSim(
     lastRestY = Number.NaN;
     steerAngle = 0;
     blocked = false;
+    blockedWas = false;
+    stepDistance = 0;
+    runTime = 0;
+    idleTime = 0;
+    look.yaw = 0;
+    look.pitch = 0;
+    look.active = false;
     reorient.transformLatLonHeightToOrigin(spawnLatLon().lat, spawnLatLon().lon, 0);
     // A new city (or a restart) re-centres the tileset, so the world has to
     // draw itself again before it is worth starting in.
@@ -839,6 +878,7 @@ export function createSim(
     if (jumped && !airborne) {
       walkVy = WALK_JUMP_SPEED;
       airborne = true;
+      footsteps?.whoosh();
     }
 
     const axes = input.sample();
@@ -877,6 +917,10 @@ export function createSim(
       WALL_PROBE_UP,
     );
     blocked = here !== null && ahead !== null && ahead - here > reach * WALK_MAX_CLIMB;
+    // Rising edge only, and only when the body had speed to lose — standing
+    // into a wall you were already leaning on is not a moment for dialogue.
+    if (blocked && !blockedWas && pose.speed > 1) companion?.say("blocked");
+    blockedWas = blocked;
     if (blocked) {
       pose.speed = 0;
       return;
@@ -886,6 +930,24 @@ export function createSim(
     const prevZ = pose.z;
     pose.x += Math.sin(pose.heading) * pose.speed * dt;
     pose.z += Math.cos(pose.heading) * pose.speed * dt;
+
+    // Footfalls are distance-driven, not clock-driven: the taps follow the
+    // stride, and stop the moment a wall stops the body.
+    stepDistance += Math.abs(pose.speed) * dt;
+    const stride = running ? 1.05 : 0.72;
+    if (stepDistance >= stride) {
+      stepDistance -= stride;
+      footsteps?.step(running);
+    }
+    if (running && pose.speed > 3.5) {
+      runTime += dt;
+      if (runTime > 14) {
+        runTime = 0;
+        companion?.say("run");
+      }
+    } else {
+      runTime = 0;
+    }
 
     const restY = groundHeightAt(pose.x, pose.y, pose.z, GROUND_PROBE_DOWN, WALK_PROBE_UP);
     if (restY === null) {
@@ -907,6 +969,8 @@ export function createSim(
         pose.y = restY;
         walkVy = 0;
         airborne = false;
+        footsteps?.thud();
+        companion?.say("jump");
       }
       return;
     }
@@ -921,6 +985,13 @@ export function createSim(
       lastRestY = here ?? restY;
       blocked = true;
       pose.speed = 0;
+      return;
+    }
+    // Standing still, the settle chase fights centimetre-scale probe noise on
+    // raw photogrammetry and the character shivers in place. A small dead-band
+    // holds the pose; anything a real step would climb still gets through.
+    if (Math.abs(pose.speed) < 0.05 && Math.abs(restY - pose.y) < 0.06) {
+      lastRestY = restY;
       return;
     }
     pose.y += (restY - pose.y) * (1 - Math.exp(-WALK_SETTLE * dt));
@@ -1228,7 +1299,7 @@ export function createSim(
     const next = QUALITY[q];
     if (!next || q === qualityLevel) return;
     qualityLevel = q;
-    tiles.errorTarget = next.errorTarget;
+    tiles.errorTarget = tierErrorTarget(q);
     tiles.lruCache.maxBytesSize = next.maxCache;
     tiles.lruCache.minBytesSize = next.minCache;
     // UpdateOnChangePlugin skips every pass until the camera moves, which left
@@ -1246,8 +1317,16 @@ export function createSim(
    * the frame loop.
    */
   function ensureAudio() {
-    // Nothing to run on foot — the engine audio is for engines.
-    if (vehicle === "walk") return;
+    // No engine on foot — the steps and her voice live here instead, under
+    // the same High-assets gate as every other sound in the game.
+    if (vehicle === "walk") {
+      if (!audioWanted || footsteps) return;
+      footsteps = createFootsteps();
+      companion ??= createCompanion();
+      footsteps?.setMuted(!flying);
+      companion?.setMuted(!flying);
+      return;
+    }
     if (!audioWanted || engineAudio || audioLoading) return;
     audioLoading = true;
     void createEngineAudio(vehicle, import.meta.env.BASE_URL)
@@ -1305,6 +1384,12 @@ export function createSim(
 
     integrate(dt);
     applyPoseToCraft();
+    // An ended drag springs the camera back to the walking line.
+    if (!look.active) {
+      const k = 1 - Math.exp(-4.2 * dt);
+      look.yaw -= look.yaw * k;
+      look.pitch -= look.pitch * k;
+    }
     placeCamera(dt);
     if (vehicle === "walk") {
       // The gait is driven by the ground speed, not by the key held: blocked
@@ -1313,6 +1398,41 @@ export function createSim(
       // Hide the character in first person — from inside its own head all you
       // would see is the back of its face.
       if (walker) walker.group.visible = cameraMode !== "cockpit";
+      // Her quieter moments: standing around, and the skyline beside you.
+      if (flying && companion && !airborne) {
+        if (Math.abs(pose.speed) < 0.05) {
+          idleTime += dt;
+          if (idleTime > 18) {
+            idleTime = 0;
+            companion.say("idle");
+          }
+        } else {
+          idleTime = 0;
+        }
+        landmarkClock -= dt;
+        if (landmarkClock <= 0) {
+          landmarkClock = 24;
+          // A tall neighbour: probe the roof height a street-width ahead and,
+          // on alternating checks, out to one side. Anything towering over
+          // the pavement by tens of metres earns a comment.
+          const side = (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 2);
+          const probes = [0, side];
+          for (const off of probes) {
+            const h = pose.heading + off;
+            const top = groundHeightAt(
+              pose.x + Math.sin(h) * 30,
+              pose.y,
+              pose.z + Math.cos(h) * 30,
+              10,
+              420,
+            );
+            if (top !== null && top - pose.y > 55) {
+              companion.say("landmark");
+              break;
+            }
+          }
+        }
+      }
     } else if (vehicle === "car") {
       // The interior is modelled, so the car stays drawn in FPP — hiding it
       // would leave the driver looking through a missing dashboard.
@@ -1357,6 +1477,8 @@ export function createSim(
       ro.disconnect();
       input.dispose();
       engineAudio?.dispose();
+      footsteps?.dispose();
+      companion?.dispose();
       tiles.dispose();
       dracoLoader.dispose();
       renderer.dispose();
@@ -1390,21 +1512,34 @@ export function createSim(
     setFlying: (v) => {
       flying = v;
       // Pausing kills the engine note rather than leaving it droning under the
-      // pause card.
+      // pause card — and her voice and the footsteps go quiet with it.
       engineAudio?.setMuted(!v);
+      footsteps?.setMuted(!v);
+      companion?.setMuted(!v);
       emitHud();
     },
     jump: () => {
       touchJump = true;
+    },
+    setLook: (partial) => {
+      if (partial.active != null) look.active = partial.active;
+      if (partial.yaw != null) look.yaw = clamp(partial.yaw, -2.6, 2.6);
+      if (partial.pitch != null) look.pitch = clamp(partial.pitch, -0.55, 0.55);
     },
     setSound: (on) => {
       audioWanted = on;
       if (on) {
         ensureAudio();
         engineAudio?.setMuted(!flying);
+        footsteps?.setMuted(!flying);
+        companion?.setMuted(!flying);
       } else {
         engineAudio?.dispose();
         engineAudio = null;
+        footsteps?.dispose();
+        footsteps = null;
+        companion?.dispose();
+        companion = null;
       }
     },
     setQuality: applyQuality,

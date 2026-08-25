@@ -47,7 +47,36 @@ export type CharacterSpec = {
    * keep their bind pose, which is what you want from a borrowed clip.
    */
   boneMap?: Record<string, string>;
+  /**
+   * Drive this rig's LEFT arm from the clip's RIGHT arm and vice versa.
+   *
+   * Some Biped exports name the arm bones against the visual mesh — the bone
+   * called `L-UpperArm` hangs off the character's right shoulder. Retargeting
+   * name-to-name then swings each hand across the body, which reads as the
+   * arms trading places every stride. Flipping the four pairs fixes it at the
+   * source; legs are left alone because a phase-flipped leg pair is almost
+   * invisible next to a flipped arm pair.
+   */
+  swapArms?: boolean;
 };
+
+const ARM_SWAP_PAIRS: Array<[string, string]> = [
+  ["Bip001-L-Clavicle", "Bip001-R-Clavicle"],
+  ["Bip001-L-UpperArm", "Bip001-R-UpperArm"],
+  ["Bip001-L-Forearm", "Bip001-R-Forearm"],
+  ["Bip001-L-Hand", "Bip001-R-Hand"],
+];
+
+/** The map with the arm pairs' sources exchanged, when a rig needs it. */
+function withSwappedArms(map: Record<string, string>, swap?: boolean): Record<string, string> {
+  if (!swap) return map;
+  const out = { ...map };
+  for (const [left, right] of ARM_SWAP_PAIRS) {
+    out[left] = map[right];
+    out[right] = map[left];
+  }
+  return out;
+}
 
 /**
  * 3ds Max Biped against Mixamo, the two rigs this game has met.
@@ -106,6 +135,9 @@ export const LACRIMOSA: CharacterSpec = {
     jump: "models/anim-jump.fbx",
   },
   boneMap: BIPED_FROM_MIXAMO,
+  // Her export names the arms against the mesh, so name-to-name retargeting
+  // swung each hand across the body. See `swapArms`.
+  swapArms: true,
 };
 
 export type Walker = {
@@ -339,10 +371,11 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
     if (own) clips[gait] = own;
   }
   if (skinned && spec.borrow && spec.boneMap) {
+    const map = withSwappedArms(spec.boneMap, spec.swapArms);
     for (const gait of ["idle", "walk", "run", "jump"] as Gait[]) {
       const url = spec.borrow[gait];
       if (!url) continue;
-      const borrowed = await borrowClip(base + url, skinned, spec.boneMap, gait);
+      const borrowed = await borrowClip(base + url, skinned, map, gait);
       if (borrowed) clips[gait] = borrowed;
     }
   }
@@ -368,20 +401,30 @@ export async function loadWalker(spec: CharacterSpec, base: string): Promise<Wal
   /** Current blend weights, eased toward the target so gait changes glide. */
   const weight = { idle: 1, walk: 0, run: 0, jump: 0 };
   let wasAirborne = false;
+  /**
+   * Hysteresis on the moving/still decision. The sim's ground speed wobbles a
+   * few centimetres a second while standing on raw photogrammetry, and a bare
+   * `pace > 0.15` test sits right inside that noise — the blend flicked
+   * between idle and walk every frame and the character shivered in place.
+   * Leaving idle takes a real step; coming back needs the body at rest.
+   */
+  let moving = false;
 
   function update(dt: number, speed: number, airborne = false) {
     // Restart the clip on the way up, not on every frame off the ground.
     if (airborne && !wasAirborne && jump) jump.reset().play();
     wasAirborne = airborne;
     const pace = Math.abs(speed);
+    if (!moving && pace > 0.25) moving = true;
+    else if (moving && pace < 0.08) moving = false;
     // Targets: still, walking, running, with a band where the two gaits share.
     let wantWalk = 0;
     let wantRun = 0;
-    if (pace > 0.15) {
+    if (moving) {
       wantRun = clamp((pace - WALK_REFERENCE * 1.4) / (RUN_REFERENCE - WALK_REFERENCE), 0, 1);
       wantWalk = 1 - wantRun;
     }
-    const wantIdle = pace > 0.15 ? 0 : 1;
+    const wantIdle = moving ? 0 : 1;
 
     const ease = 1 - Math.exp(-dt / BLEND);
     weight.idle += (wantIdle - weight.idle) * ease;
