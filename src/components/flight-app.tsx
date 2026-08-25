@@ -946,6 +946,14 @@ export function FlightApp() {
                         ? "High · sharp structures and filtered textures."
                         : "Ultra · maximum sharpness — needs a strong GPU, RAM headroom and fast internet."}
                 </p>
+                {simReady ? (
+                  // What the renderer itself reports, straight from the HUD
+                  // snapshot — if this stops following the buttons, a stale
+                  // service worker is serving an old bundle.
+                  <p className="font-mono text-[10px] uppercase tracking-hud text-dim">
+                    engine: {hud.quality}
+                  </p>
+                ) : null}
                 <div className="flex items-center gap-4">
                   <span className="font-mono text-xs tracking-label text-muted uppercase">
                     Assets
